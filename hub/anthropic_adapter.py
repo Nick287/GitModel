@@ -297,6 +297,7 @@ def openai_to_anthropic_response(
         content_blocks.append({"type": "text", "text": ""})
 
     usage = resp.get("usage") or {}
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
     return {
         "id": resp.get("id") or f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -308,6 +309,7 @@ def openai_to_anthropic_response(
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
+            "cache_read_input_tokens": cached,
         },
     }
 
@@ -381,6 +383,9 @@ async def stream_openai_to_anthropic(
                     usage = {
                         "input_tokens": u.get("prompt_tokens", 0),
                         "output_tokens": u.get("completion_tokens", 0),
+                        "cache_read_input_tokens": (
+                            u.get("prompt_tokens_details") or {}
+                        ).get("cached_tokens", 0),
                     }
                 choices = data.get("choices") or []
                 if not choices:

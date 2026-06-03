@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS usage (
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     total_tokens  INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
     streamed      INTEGER NOT NULL DEFAULT 0,
     estimated     INTEGER NOT NULL DEFAULT 0,
     status        INTEGER NOT NULL DEFAULT 200
@@ -68,6 +69,16 @@ def _conn() -> Iterator[sqlite3.Connection]:
 def init_db() -> None:
     with _conn() as c:
         c.executescript(_SCHEMA)
+        _migrate(c)
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    """Apply in-place schema upgrades for existing databases."""
+    cols = {row["name"] for row in c.execute("PRAGMA table_info(usage)")}
+    if "cached_tokens" not in cols:
+        c.execute(
+            "ALTER TABLE usage ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -192,7 +203,12 @@ DEFAULT_PRICING: dict[str, dict[str, float]] = {
 
 
 def get_pricing() -> dict[str, dict[str, float]]:
-    """Return the saved pricing table merged over the defaults."""
+    """Return the saved pricing table merged over the defaults.
+
+    Each model has ``input`` / ``output`` and an optional ``cache_read`` rate
+    (USD per 1M tokens). When ``cache_read`` is absent it defaults to
+    ``input * 0.1`` — matching Anthropic's cache-hit pricing (0.1x base input).
+    """
     import json
 
     pricing = {k: dict(v) for k, v in DEFAULT_PRICING.items()}
@@ -203,12 +219,18 @@ def get_pricing() -> dict[str, dict[str, float]]:
             if isinstance(saved, dict):
                 for model, rates in saved.items():
                     if isinstance(rates, dict):
-                        pricing[model] = {
+                        entry = {
                             "input": float(rates.get("input", 0) or 0),
                             "output": float(rates.get("output", 0) or 0),
                         }
+                        if rates.get("cache_read") is not None:
+                            entry["cache_read"] = float(rates.get("cache_read") or 0)
+                        pricing[model] = entry
         except (ValueError, TypeError):
             pass
+    # Fill in a default cache_read (0.1x input) wherever it's missing.
+    for rates in pricing.values():
+        rates.setdefault("cache_read", round(rates.get("input", 0) * 0.1, 6))
     return pricing
 
 
@@ -220,10 +242,13 @@ def set_pricing(pricing: dict[str, Any]) -> None:
         if not isinstance(rates, dict):
             continue
         try:
-            clean[str(model)] = {
+            entry = {
                 "input": float(rates.get("input", 0) or 0),
                 "output": float(rates.get("output", 0) or 0),
             }
+            if rates.get("cache_read") is not None:
+                entry["cache_read"] = float(rates.get("cache_read") or 0)
+            clean[str(model)] = entry
         except (ValueError, TypeError):
             continue
     set_setting("pricing", json.dumps(clean))
@@ -231,13 +256,23 @@ def set_pricing(pricing: dict[str, Any]) -> None:
 
 def estimate_cost(
     pricing: dict[str, dict[str, float]], model: str | None,
-    input_tokens: int, output_tokens: int,
+    input_tokens: int, output_tokens: int, cached_tokens: int = 0,
 ) -> float:
-    """USD cost for a row given the pricing table (per 1M tokens)."""
+    """USD cost for a row given the pricing table (per 1M tokens).
+
+    ``cached_tokens`` are a subset of ``input_tokens`` that hit the prompt
+    cache; they are billed at the (cheaper) ``cache_read`` rate, and the
+    remaining uncached input at the normal ``input`` rate.
+    """
     rates = pricing.get(model or "") or pricing.get("default") or {}
-    cost_in = (input_tokens / 1_000_000) * rates.get("input", 0)
+    in_rate = rates.get("input", 0)
+    cache_rate = rates.get("cache_read", in_rate * 0.1)
+    cached = max(0, min(cached_tokens or 0, input_tokens or 0))
+    uncached = (input_tokens or 0) - cached
+    cost_in = (uncached / 1_000_000) * in_rate
+    cost_cache = (cached / 1_000_000) * cache_rate
     cost_out = (output_tokens / 1_000_000) * rates.get("output", 0)
-    return cost_in + cost_out
+    return cost_in + cost_cache + cost_out
 
 
 # --------------------------------------------------------------------------- #
@@ -290,12 +325,14 @@ def record_usage(
     streamed: bool,
     estimated: bool,
     status: int = 200,
+    cached_tokens: int = 0,
 ) -> None:
     with _conn() as c:
         c.execute(
             "INSERT INTO usage(ts, api_key, model, served_model, endpoint, "
-            "input_tokens, output_tokens, total_tokens, streamed, estimated, status) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "input_tokens, output_tokens, total_tokens, cached_tokens, "
+            "streamed, estimated, status) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 time.time(),
                 api_key,
@@ -305,6 +342,7 @@ def record_usage(
                 int(input_tokens or 0),
                 int(output_tokens or 0),
                 int(total_tokens or 0),
+                int(cached_tokens or 0),
                 1 if streamed else 0,
                 1 if estimated else 0,
                 int(status),
@@ -328,6 +366,7 @@ def usage_summary(since: float | None, until: float | None) -> dict[str, Any]:
             f"SELECT COUNT(*) AS requests, "
             f"COALESCE(SUM(input_tokens),0) AS input_tokens, "
             f"COALESCE(SUM(output_tokens),0) AS output_tokens, "
+            f"COALESCE(SUM(cached_tokens),0) AS cached_tokens, "
             f"COALESCE(SUM(total_tokens),0) AS total_tokens "
             f"FROM usage {clause}",
             params,
@@ -337,6 +376,7 @@ def usage_summary(since: float | None, until: float | None) -> dict[str, Any]:
             f"SELECT model, COUNT(*) AS requests, "
             f"COALESCE(SUM(input_tokens),0) AS input_tokens, "
             f"COALESCE(SUM(output_tokens),0) AS output_tokens, "
+            f"COALESCE(SUM(cached_tokens),0) AS cached_tokens, "
             f"COALESCE(SUM(total_tokens),0) AS total_tokens "
             f"FROM usage {clause} GROUP BY model ORDER BY total_tokens DESC",
             params,
@@ -372,6 +412,7 @@ def usage_summary_with_cost(since: float | None, until: float | None) -> dict[st
         cost = estimate_cost(
             pricing, row.get("model"),
             row.get("input_tokens", 0), row.get("output_tokens", 0),
+            row.get("cached_tokens", 0),
         )
         row["cost"] = round(cost, 4)
         total_cost += cost
@@ -383,7 +424,7 @@ def recent_usage(limit: int = 50) -> list[dict[str, Any]]:
     with _conn() as c:
         rows = c.execute(
             "SELECT ts, api_key, model, served_model, endpoint, input_tokens, "
-            "output_tokens, total_tokens, streamed, estimated, status "
+            "output_tokens, total_tokens, cached_tokens, streamed, estimated, status "
             "FROM usage ORDER BY ts DESC LIMIT ?",
             (limit,),
         ).fetchall()

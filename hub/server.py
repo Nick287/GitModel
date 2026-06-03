@@ -157,22 +157,28 @@ def _login_success(ip: str) -> None:
     _LOGIN_ATTEMPTS.pop(ip, None)
 
 
-def _norm_usage(usage: dict[str, Any] | None, *, responses_shape: bool) -> tuple[int, int, int]:
+def _norm_usage(usage: dict[str, Any] | None, *, responses_shape: bool) -> tuple[int, int, int, int]:
     if not usage:
-        return 0, 0, 0
+        return 0, 0, 0, 0
     if responses_shape:
         i = usage.get("input_tokens", 0)
         o = usage.get("output_tokens", 0)
         t = usage.get("total_tokens", i + o)
+        # Responses API nests cache info under input_tokens_details.
+        details = usage.get("input_tokens_details") or {}
+        cached = details.get("cached_tokens", 0)
     else:
         i = usage.get("prompt_tokens", 0)
         o = usage.get("completion_tokens", 0)
         t = usage.get("total_tokens", i + o)
-    return i, o, t
+        details = usage.get("prompt_tokens_details") or {}
+        cached = details.get("cached_tokens", 0)
+    return i, o, t, cached
 
 
 def _record(
-    *, client_key, model, served, endpoint, usage3, streamed, estimated, status=200
+    *, client_key, model, served, endpoint, usage3, streamed, estimated,
+    status=200, cached=0,
 ) -> None:
     i, o, t = usage3
     store.record_usage(
@@ -186,6 +192,7 @@ def _record(
         streamed=streamed,
         estimated=estimated,
         status=status,
+        cached_tokens=cached,
     )
 
 
@@ -269,9 +276,10 @@ async def _passthrough(
                     estimated=False, status=status)
             return JSONResponse(data, status_code=status)
         served = data.get("model") if isinstance(data, dict) else None
-        usage3 = _norm_usage(data.get("usage"), responses_shape=responses_shape)
+        i, o, t, cached = _norm_usage(data.get("usage"), responses_shape=responses_shape)
         _record(client_key=client_key, model=model, served=served,
-                endpoint=endpoint, usage3=usage3, streamed=False, estimated=False)
+                endpoint=endpoint, usage3=(i, o, t), streamed=False,
+                estimated=False, cached=cached)
         return JSONResponse(data)
 
     # Streaming passthrough. Ask the backend to report usage for chat.
@@ -289,7 +297,7 @@ async def _passthrough(
                 yield chunk
         finally:
             usage = _parse_sse_usage("".join(collected), responses_shape=responses_shape)
-            i, o, t = _norm_usage(usage, responses_shape=responses_shape)
+            i, o, t, cached = _norm_usage(usage, responses_shape=responses_shape)
             # Backend often omits prompt_tokens on streams — estimate input.
             input_estimated = not i
             if input_estimated:
@@ -297,7 +305,7 @@ async def _passthrough(
                 t = i + o
             _record(client_key=client_key, model=model, served=None,
                     endpoint=endpoint, usage3=(i, o, t), streamed=True,
-                    estimated=usage is None or input_estimated)
+                    estimated=usage is None or input_estimated, cached=cached)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -355,7 +363,8 @@ async def v1_messages(request: Request) -> Any:
                 endpoint="messages",
                 usage3=(u["input_tokens"], u["output_tokens"],
                         u["input_tokens"] + u["output_tokens"]),
-                streamed=False, estimated=False)
+                streamed=False, estimated=False,
+                cached=u.get("cache_read_input_tokens", 0))
         return JSONResponse(anth)
 
     # Streaming: translate OpenAI SSE -> Anthropic SSE.
@@ -374,6 +383,7 @@ async def v1_messages(request: Request) -> Any:
         finally:
             i = (final_usage or {}).get("input_tokens", 0)
             o = (final_usage or {}).get("output_tokens", 0)
+            cached = (final_usage or {}).get("cache_read_input_tokens", 0)
             # Copilot's streaming SSE usually omits prompt_tokens — fall back
             # to a local estimate so input usage isn't silently lost.
             input_estimated = not i
@@ -381,7 +391,8 @@ async def v1_messages(request: Request) -> Any:
                 i = est_input
             _record(client_key=client_key, model=model, served=None,
                     endpoint="messages", usage3=(i, o, i + o),
-                    streamed=True, estimated=final_usage is None or input_estimated)
+                    streamed=True, estimated=final_usage is None or input_estimated,
+                    cached=cached)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
