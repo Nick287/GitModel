@@ -70,6 +70,18 @@ variable "require_auth" {
   default     = true
 }
 
+variable "login_max_fails" {
+  type        = number
+  description = "HUB_LOGIN_MAX_FAILS: consecutive failed admin logins from one IP before lockout. Set 0 to disable throttling."
+  default     = 5
+}
+
+variable "login_lock_seconds" {
+  type        = number
+  description = "HUB_LOGIN_LOCK_SECONDS: how long (seconds) an IP stays locked after too many failed admin logins."
+  default     = 900
+}
+
 variable "cpu" {
   type        = number
   description = "vCPU per replica."

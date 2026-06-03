@@ -108,6 +108,16 @@ resource "azurerm_container_app" "hub" {
         value = tostring(var.require_auth)
       }
 
+      env {
+        name  = "HUB_LOGIN_MAX_FAILS"
+        value = tostring(var.login_max_fails)
+      }
+
+      env {
+        name  = "HUB_LOGIN_LOCK_SECONDS"
+        value = tostring(var.login_lock_seconds)
+      }
+
       volume_mounts {
         name = "data"
         path = "/data"

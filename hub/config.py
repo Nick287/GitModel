@@ -53,6 +53,16 @@ def _bool(name: str, default: bool) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _int(name: str, default: int) -> int:
+    v = os.environ.get(name)
+    if v is None or not v.strip():
+        return default
+    try:
+        return int(v.strip())
+    except ValueError:
+        return default
+
+
 class Settings:
     """Hub settings resolved from the environment."""
 
@@ -82,6 +92,12 @@ class Settings:
 
         # Allow seeding the Copilot OAuth token directly from the environment.
         self.copilot_oauth_token = os.environ.get("COPILOT_OAUTH_TOKEN", "").strip()
+
+        # Admin login rate limiting (brute-force protection). After
+        # `login_max_fails` consecutive failures from one client IP, that IP is
+        # locked out for `login_lock_seconds`. Set max_fails <= 0 to disable.
+        self.login_max_fails = _int("HUB_LOGIN_MAX_FAILS", 5)
+        self.login_lock_seconds = _int("HUB_LOGIN_LOCK_SECONDS", 15 * 60)
 
 
 @lru_cache(maxsize=1)

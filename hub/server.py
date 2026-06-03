@@ -42,6 +42,10 @@ _STATIC = Path(__file__).parent / "static"
 _SESSIONS: dict[str, float] = {}
 _SESSION_TTL = 12 * 3600  # 12h
 
+# In-memory admin login throttle: client IP -> {"fails": int, "until": epoch}.
+# Cleared on restart. Thresholds come from settings (env-configurable).
+_LOGIN_ATTEMPTS: dict[str, dict[str, float]] = {}
+
 
 @app.on_event("startup")
 def _startup() -> None:
@@ -104,6 +108,53 @@ def _check_admin(x_admin_token: str | None) -> None:
         return
     raise HTTPException(status_code=401, detail="Admin login required")
 
+
+# --------------------------------------------------------------------------- #
+# Admin login brute-force throttle (per client IP, in-memory)
+# --------------------------------------------------------------------------- #
+def _client_ip(request: Request) -> str:
+    """Best-effort real client IP, honoring the proxy's X-Forwarded-For.
+
+    Azure Container Apps (and most reverse proxies) put the original client
+    address first in X-Forwarded-For; request.client.host is the proxy.
+    """
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _login_check_locked(ip: str) -> None:
+    """Raise 429 if this IP is currently locked out."""
+    import time
+
+    rec = _LOGIN_ATTEMPTS.get(ip)
+    if rec and rec.get("until", 0) > time.time():
+        wait = int(rec["until"] - time.time())
+        raise HTTPException(
+            status_code=429,
+            detail=f"尝试次数过多，请 {wait // 60 + 1} 分钟后再试",
+        )
+
+
+def _login_fail(ip: str) -> None:
+    """Record one failed attempt; lock the IP once the threshold is hit."""
+    import time
+
+    s = get_settings()
+    if s.login_max_fails <= 0:  # throttling disabled
+        return
+    rec = _LOGIN_ATTEMPTS.get(ip) or {"fails": 0.0, "until": 0.0}
+    rec["fails"] = rec.get("fails", 0) + 1
+    if rec["fails"] >= s.login_max_fails:
+        rec["until"] = time.time() + s.login_lock_seconds
+        rec["fails"] = 0.0  # reset counter; re-counts after the lock expires
+    _LOGIN_ATTEMPTS[ip] = rec
+
+
+def _login_success(ip: str) -> None:
+    """Clear an IP's failure record on a successful login."""
+    _LOGIN_ATTEMPTS.pop(ip, None)
 
 
 def _norm_usage(usage: dict[str, Any] | None, *, responses_shape: bool) -> tuple[int, int, int]:
@@ -340,11 +391,15 @@ async def v1_messages(request: Request) -> Any:
 # =========================================================================== #
 @app.post("/api/login")
 async def api_login(request: Request) -> Any:
+    ip = _client_ip(request)
+    _login_check_locked(ip)
     body = await request.json()
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
     if not store.verify_admin(username, password):
+        _login_fail(ip)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    _login_success(ip)
     return {"token": _new_session(), "username": username}
 
 

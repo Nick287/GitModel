@@ -12,3 +12,5 @@ image_tag                      = "gitmodel:latest"
 # location            = "centralus"
 # file_share_name     = "gitmodel-data"
 # require_auth        = true
+# login_max_fails     = 5     # failed admin logins per IP before lockout (0 = disable)
+# login_lock_seconds  = 900   # lockout duration in seconds
