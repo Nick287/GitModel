@@ -22,6 +22,18 @@ db-container/
 # Secrets / local config
 .env
 
+# Terraform (state + tfvars may contain secrets)
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+*.tfvars.json
+!**/*.tfvars.example
+
+# Local scratch
+_read_token.py
+
 # Editor / OS
 .vscode/
 .idea/

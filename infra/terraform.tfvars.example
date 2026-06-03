@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and adjust. Run: terraform init && terraform apply
+
+# --- Required: point these at your existing Azure resources ---------------
+acr_name                       = "<your-acr-name>"
+acr_resource_group_name        = "<your-acr-resource-group>"
+storage_account_name           = "<your-storage-account>"
+storage_account_resource_group = "<your-storage-resource-group>"
+image_tag                      = "gitmodel:latest"
+
+# --- Optional overrides ---------------------------------------------------
+# resource_group_name = "gitmodel-rg"
+# location            = "centralus"
+# file_share_name     = "gitmodel-data"
+# require_auth        = true
