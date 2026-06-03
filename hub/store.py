@@ -1,0 +1,390 @@
+"""Persistence layer for GitModel Hub (SQLite).
+
+Stores three things:
+
+* the long-lived Copilot OAuth token (single row),
+* locally issued hub API keys (used by Codex / Claude Code / curl clients),
+* per-request token usage records for statistics.
+
+A small connection-per-call model keeps things thread-safe under the FastAPI
+threadpool without needing an async DB driver.
+"""
+from __future__ import annotations
+
+import secrets
+import sqlite3
+import time
+from contextlib import contextmanager
+from typing import Any, Iterator
+
+from .config import get_settings
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    key        TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    revoked    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            REAL NOT NULL,
+    api_key       TEXT,
+    model         TEXT,
+    served_model  TEXT,
+    endpoint      TEXT,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens  INTEGER NOT NULL DEFAULT 0,
+    streamed      INTEGER NOT NULL DEFAULT 0,
+    estimated     INTEGER NOT NULL DEFAULT 0,
+    status        INTEGER NOT NULL DEFAULT 200
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
+CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model);
+"""
+
+
+@contextmanager
+def _conn() -> Iterator[sqlite3.Connection]:
+    db = get_settings().db_path
+    conn = sqlite3.connect(db, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    with _conn() as c:
+        c.executescript(_SCHEMA)
+
+
+# --------------------------------------------------------------------------- #
+# OAuth token (key/value)
+# --------------------------------------------------------------------------- #
+def get_oauth_token() -> str | None:
+    with _conn() as c:
+        row = c.execute("SELECT value FROM kv WHERE key='oauth_token'").fetchone()
+        return row["value"] if row else None
+
+
+def set_oauth_token(token: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO kv(key, value) VALUES('oauth_token', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (token,),
+        )
+
+
+def clear_oauth_token() -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM kv WHERE key='oauth_token'")
+
+
+# --------------------------------------------------------------------------- #
+# Generic settings (kv) + admin credentials
+# --------------------------------------------------------------------------- #
+def get_setting(key: str, default: str | None = None) -> str | None:
+    with _conn() as c:
+        row = c.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO kv(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+def _hash_password(password: str, salt: str) -> str:
+    import hashlib
+
+    return hashlib.sha256((salt + ":" + password).encode("utf-8")).hexdigest()
+
+
+def ensure_admin_defaults() -> None:
+    """Seed default admin/admin credentials on first run."""
+    if get_setting("admin_username") is None:
+        set_setting("admin_username", "admin")
+    if get_setting("admin_pw_salt") is None or get_setting("admin_pw_hash") is None:
+        salt = secrets.token_hex(8)
+        set_setting("admin_pw_salt", salt)
+        set_setting("admin_pw_hash", _hash_password("admin", salt))
+
+
+def get_admin_username() -> str:
+    return get_setting("admin_username", "admin") or "admin"
+
+
+def verify_admin(username: str, password: str) -> bool:
+    if username != get_admin_username():
+        return False
+    salt = get_setting("admin_pw_salt") or ""
+    expected = get_setting("admin_pw_hash") or ""
+    return bool(expected) and secrets.compare_digest(
+        _hash_password(password, salt), expected
+    )
+
+
+def set_admin_credentials(username: str, password: str) -> None:
+    salt = secrets.token_hex(8)
+    set_setting("admin_username", username)
+    set_setting("admin_pw_salt", salt)
+    set_setting("admin_pw_hash", _hash_password(password, salt))
+
+
+def get_require_auth(default: bool) -> bool:
+    val = get_setting("require_auth")
+    if val is None:
+        return default
+    return val == "1"
+
+
+def set_require_auth(enabled: bool) -> None:
+    set_setting("require_auth", "1" if enabled else "0")
+
+
+# --------------------------------------------------------------------------- #
+# Pricing (USD per 1M tokens, split input / output) — used for cost estimates
+# --------------------------------------------------------------------------- #
+# Public list prices (USD per 1M tokens) as of the Anthropic pricing page;
+# the admin can edit them in the portal. "default" is the fallback applied to
+# any model not listed. Source: platform.claude.com/docs/.../pricing
+DEFAULT_PRICING: dict[str, dict[str, float]] = {
+    "default": {"input": 3.0, "output": 15.0},
+    # Claude Sonnet (3.5 / 3.7 / 4 / 4.5 / 4.6) — $3 / $15
+    "claude-3.5-sonnet": {"input": 3.0, "output": 15.0},
+    "claude-3.7-sonnet": {"input": 3.0, "output": 15.0},
+    "claude-sonnet-4": {"input": 3.0, "output": 15.0},
+    "claude-sonnet-4.5": {"input": 3.0, "output": 15.0},
+    "claude-sonnet-4.6": {"input": 3.0, "output": 15.0},
+    # Claude Opus 4 / 4.1 (older tier) — $15 / $75
+    "claude-opus-4": {"input": 15.0, "output": 75.0},
+    "claude-opus-4.1": {"input": 15.0, "output": 75.0},
+    # Claude Opus 4.5 / 4.6 / 4.7 / 4.8 (current tier) — $5 / $25
+    "claude-opus-4.5": {"input": 5.0, "output": 25.0},
+    "claude-opus-4.6": {"input": 5.0, "output": 25.0},
+    "claude-opus-4.7": {"input": 5.0, "output": 25.0},
+    "claude-opus-4.8": {"input": 5.0, "output": 25.0},
+    # Claude Haiku — 4.5: $1 / $5, 3.5: $0.80 / $4
+    "claude-haiku-4.5": {"input": 1.0, "output": 5.0},
+    "claude-3.5-haiku": {"input": 0.80, "output": 4.0},
+    # OpenAI-side models (rough public list prices, for reference)
+    "gpt-4.1": {"input": 2.0, "output": 8.0},
+    "gpt-5.5": {"input": 1.25, "output": 10.0},
+    "gpt-5.3-codex": {"input": 1.25, "output": 10.0},
+}
+
+
+def get_pricing() -> dict[str, dict[str, float]]:
+    """Return the saved pricing table merged over the defaults."""
+    import json
+
+    pricing = {k: dict(v) for k, v in DEFAULT_PRICING.items()}
+    raw = get_setting("pricing")
+    if raw:
+        try:
+            saved = json.loads(raw)
+            if isinstance(saved, dict):
+                for model, rates in saved.items():
+                    if isinstance(rates, dict):
+                        pricing[model] = {
+                            "input": float(rates.get("input", 0) or 0),
+                            "output": float(rates.get("output", 0) or 0),
+                        }
+        except (ValueError, TypeError):
+            pass
+    return pricing
+
+
+def set_pricing(pricing: dict[str, Any]) -> None:
+    import json
+
+    clean: dict[str, dict[str, float]] = {}
+    for model, rates in (pricing or {}).items():
+        if not isinstance(rates, dict):
+            continue
+        try:
+            clean[str(model)] = {
+                "input": float(rates.get("input", 0) or 0),
+                "output": float(rates.get("output", 0) or 0),
+            }
+        except (ValueError, TypeError):
+            continue
+    set_setting("pricing", json.dumps(clean))
+
+
+def estimate_cost(
+    pricing: dict[str, dict[str, float]], model: str | None,
+    input_tokens: int, output_tokens: int,
+) -> float:
+    """USD cost for a row given the pricing table (per 1M tokens)."""
+    rates = pricing.get(model or "") or pricing.get("default") or {}
+    cost_in = (input_tokens / 1_000_000) * rates.get("input", 0)
+    cost_out = (output_tokens / 1_000_000) * rates.get("output", 0)
+    return cost_in + cost_out
+
+
+# --------------------------------------------------------------------------- #
+# API keys
+# --------------------------------------------------------------------------- #
+def create_api_key(name: str) -> dict[str, Any]:
+    key = "sk-hub-" + secrets.token_urlsafe(32)
+    now = time.time()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO api_keys(key, name, created_at, revoked) VALUES(?,?,?,0)",
+            (key, name, now),
+        )
+    return {"key": key, "name": name, "created_at": now, "revoked": False}
+
+
+def list_api_keys() -> list[dict[str, Any]]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT key, name, created_at, revoked FROM api_keys ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_api_key(key: str) -> None:
+    with _conn() as c:
+        c.execute("UPDATE api_keys SET revoked=1 WHERE key=?", (key,))
+
+
+def is_valid_api_key(key: str) -> bool:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM api_keys WHERE key=? AND revoked=0", (key,)
+        ).fetchone()
+        return row is not None
+
+
+# --------------------------------------------------------------------------- #
+# Usage
+# --------------------------------------------------------------------------- #
+def record_usage(
+    *,
+    api_key: str | None,
+    model: str | None,
+    served_model: str | None,
+    endpoint: str,
+    input_tokens: int,
+    output_tokens: int,
+    total_tokens: int,
+    streamed: bool,
+    estimated: bool,
+    status: int = 200,
+) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO usage(ts, api_key, model, served_model, endpoint, "
+            "input_tokens, output_tokens, total_tokens, streamed, estimated, status) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                time.time(),
+                api_key,
+                model,
+                served_model,
+                endpoint,
+                int(input_tokens or 0),
+                int(output_tokens or 0),
+                int(total_tokens or 0),
+                1 if streamed else 0,
+                1 if estimated else 0,
+                int(status),
+            ),
+        )
+
+
+def usage_summary(since: float | None, until: float | None) -> dict[str, Any]:
+    where = []
+    params: list[Any] = []
+    if since is not None:
+        where.append("ts >= ?")
+        params.append(since)
+    if until is not None:
+        where.append("ts <= ?")
+        params.append(until)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+
+    with _conn() as c:
+        totals = c.execute(
+            f"SELECT COUNT(*) AS requests, "
+            f"COALESCE(SUM(input_tokens),0) AS input_tokens, "
+            f"COALESCE(SUM(output_tokens),0) AS output_tokens, "
+            f"COALESCE(SUM(total_tokens),0) AS total_tokens "
+            f"FROM usage {clause}",
+            params,
+        ).fetchone()
+
+        by_model = c.execute(
+            f"SELECT model, COUNT(*) AS requests, "
+            f"COALESCE(SUM(input_tokens),0) AS input_tokens, "
+            f"COALESCE(SUM(output_tokens),0) AS output_tokens, "
+            f"COALESCE(SUM(total_tokens),0) AS total_tokens "
+            f"FROM usage {clause} GROUP BY model ORDER BY total_tokens DESC",
+            params,
+        ).fetchall()
+
+        by_day = c.execute(
+            f"SELECT date(ts, 'unixepoch', 'localtime') AS day, "
+            f"COALESCE(SUM(total_tokens),0) AS total_tokens, "
+            f"COUNT(*) AS requests "
+            f"FROM usage {clause} GROUP BY day ORDER BY day",
+            params,
+        ).fetchall()
+
+    return {
+        "totals": dict(totals),
+        "by_model": [dict(r) for r in by_model],
+        "by_day": [dict(r) for r in by_day],
+        "pricing": pricing_table(),
+    }
+
+
+def pricing_table() -> dict[str, dict[str, float]]:
+    """Public alias kept stable for callers/tests."""
+    return get_pricing()
+
+
+def usage_summary_with_cost(since: float | None, until: float | None) -> dict[str, Any]:
+    """usage_summary plus per-model and total USD cost estimates."""
+    data = usage_summary(since, until)
+    pricing = data["pricing"]
+    total_cost = 0.0
+    for row in data["by_model"]:
+        cost = estimate_cost(
+            pricing, row.get("model"),
+            row.get("input_tokens", 0), row.get("output_tokens", 0),
+        )
+        row["cost"] = round(cost, 4)
+        total_cost += cost
+    data["totals"]["cost"] = round(total_cost, 4)
+    return data
+
+
+def recent_usage(limit: int = 50) -> list[dict[str, Any]]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT ts, api_key, model, served_model, endpoint, input_tokens, "
+            "output_tokens, total_tokens, streamed, estimated, status "
+            "FROM usage ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]

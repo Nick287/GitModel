@@ -1,0 +1,508 @@
+"""FastAPI application exposing OpenAI- and Anthropic-compatible endpoints
+backed by a personal GitHub Copilot subscription, plus a management portal.
+
+Endpoints
+---------
+OpenAI-compatible (for Codex, OpenAI SDK, curl):
+    GET  /v1/models
+    POST /v1/chat/completions      (stream + non-stream)
+    POST /v1/responses             (stream + non-stream)
+
+Anthropic-compatible (for Claude Code, Anthropic SDK):
+    POST /v1/messages              (stream + non-stream)
+
+Management portal API:
+    GET  /api/status
+    POST /api/auth/device/start
+    POST /api/auth/device/poll
+    POST /api/auth/logout
+    GET  /api/models
+    GET  /api/usage
+    GET  /api/usage/recent
+    GET/POST /api/keys, DELETE /api/keys/{key}
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, AsyncIterator
+
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+
+from . import anthropic_adapter as aa
+from . import copilot_client as cc
+from . import store
+from .config import get_settings
+
+app = FastAPI(title="GitModel Hub", version="0.1.0")
+_STATIC = Path(__file__).parent / "static"
+
+# In-memory admin sessions: token -> expiry epoch. Cleared on restart.
+_SESSIONS: dict[str, float] = {}
+_SESSION_TTL = 12 * 3600  # 12h
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    store.init_db()
+    store.ensure_admin_defaults()
+
+
+# --------------------------------------------------------------------------- #
+# Auth helpers
+# --------------------------------------------------------------------------- #
+def _extract_client_key(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    xkey = request.headers.get("x-api-key")
+    if xkey:
+        return xkey.strip()
+    return None
+
+
+def _check_client_auth(request: Request) -> str | None:
+    """Return the client key (for usage attribution); enforce auth if required."""
+    key = _extract_client_key(request)
+    s = get_settings()
+    if store.get_require_auth(s.require_auth):
+        if not key or not store.is_valid_api_key(key):
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return key
+
+
+def _new_session() -> str:
+    import secrets
+    import time
+
+    token = secrets.token_urlsafe(32)
+    _SESSIONS[token] = time.time() + _SESSION_TTL
+    return token
+
+
+def _valid_session(token: str | None) -> bool:
+    import time
+
+    if not token:
+        return False
+    exp = _SESSIONS.get(token)
+    if not exp:
+        return False
+    if exp < time.time():
+        _SESSIONS.pop(token, None)
+        return False
+    return True
+
+
+def _check_admin(x_admin_token: str | None) -> None:
+    """Require a valid admin session token (or the env override token)."""
+    env_token = get_settings().admin_token
+    if env_token and (x_admin_token or "") == env_token:
+        return
+    if _valid_session(x_admin_token):
+        return
+    raise HTTPException(status_code=401, detail="Admin login required")
+
+
+
+def _norm_usage(usage: dict[str, Any] | None, *, responses_shape: bool) -> tuple[int, int, int]:
+    if not usage:
+        return 0, 0, 0
+    if responses_shape:
+        i = usage.get("input_tokens", 0)
+        o = usage.get("output_tokens", 0)
+        t = usage.get("total_tokens", i + o)
+    else:
+        i = usage.get("prompt_tokens", 0)
+        o = usage.get("completion_tokens", 0)
+        t = usage.get("total_tokens", i + o)
+    return i, o, t
+
+
+def _record(
+    *, client_key, model, served, endpoint, usage3, streamed, estimated, status=200
+) -> None:
+    i, o, t = usage3
+    store.record_usage(
+        api_key=client_key,
+        model=model,
+        served_model=served,
+        endpoint=endpoint,
+        input_tokens=i,
+        output_tokens=o,
+        total_tokens=t,
+        streamed=streamed,
+        estimated=estimated,
+        status=status,
+    )
+
+
+def _parse_sse_usage(text: str, *, responses_shape: bool) -> dict[str, Any] | None:
+    usage: dict[str, Any] | None = None
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if responses_shape:
+            resp = obj.get("response") if isinstance(obj, dict) else None
+            cand = (resp or {}).get("usage") if isinstance(resp, dict) else None
+            cand = cand or obj.get("usage")
+        else:
+            cand = obj.get("usage")
+        if cand:
+            usage = cand
+    return usage
+
+
+# =========================================================================== #
+# OpenAI-compatible endpoints
+# =========================================================================== #
+def _openai_models_payload(models: list[dict[str, Any]]) -> dict[str, Any]:
+    data = []
+    for m in models:
+        data.append(
+            {
+                "id": m.get("id"),
+                "object": "model",
+                "created": 0,
+                "owned_by": m.get("vendor", "github-copilot"),
+            }
+        )
+    return {"object": "list", "data": data}
+
+
+@app.get("/v1/models")
+async def v1_models(request: Request) -> JSONResponse:
+    _check_client_auth(request)
+    try:
+        models = await cc.list_models()
+    except cc.NotAuthenticatedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return JSONResponse(_openai_models_payload(models))
+
+
+async def _passthrough(
+    request: Request, path: str, *, responses_shape: bool
+) -> Any:
+    client_key = _check_client_auth(request)
+    body = await request.json()
+    model = body.get("model")
+    stream = bool(body.get("stream"))
+    endpoint = path.strip("/").replace("/", ".")
+
+    if not cc.is_authenticated():
+        raise HTTPException(status_code=503, detail="Hub not logged in to Copilot")
+
+    vision_headers = (
+        {"Copilot-Vision-Request": "true"}
+        if aa.has_image_content(body)
+        else None
+    )
+
+    if not stream:
+        try:
+            status, data = await cc.post_json(path, body, vision_headers)
+        except cc.NotAuthenticatedError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        if status != 200:
+            _record(client_key=client_key, model=model, served=None,
+                    endpoint=endpoint, usage3=(0, 0, 0), streamed=False,
+                    estimated=False, status=status)
+            return JSONResponse(data, status_code=status)
+        served = data.get("model") if isinstance(data, dict) else None
+        usage3 = _norm_usage(data.get("usage"), responses_shape=responses_shape)
+        _record(client_key=client_key, model=model, served=served,
+                endpoint=endpoint, usage3=usage3, streamed=False, estimated=False)
+        return JSONResponse(data)
+
+    # Streaming passthrough. Ask the backend to report usage for chat.
+    if not responses_shape:
+        body.setdefault("stream_options", {})
+        if isinstance(body["stream_options"], dict):
+            body["stream_options"].setdefault("include_usage", True)
+    est_input = aa.estimate_prompt_tokens(body)
+
+    async def gen() -> AsyncIterator[bytes]:
+        collected: list[str] = []
+        try:
+            async for chunk in cc.stream(path, body, vision_headers):
+                collected.append(chunk.decode("utf-8", "replace"))
+                yield chunk
+        finally:
+            usage = _parse_sse_usage("".join(collected), responses_shape=responses_shape)
+            i, o, t = _norm_usage(usage, responses_shape=responses_shape)
+            # Backend often omits prompt_tokens on streams — estimate input.
+            input_estimated = not i
+            if input_estimated:
+                i = est_input
+                t = i + o
+            _record(client_key=client_key, model=model, served=None,
+                    endpoint=endpoint, usage3=(i, o, t), streamed=True,
+                    estimated=usage is None or input_estimated)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/v1/chat/completions")
+async def v1_chat_completions(request: Request) -> Any:
+    return await _passthrough(request, "/chat/completions", responses_shape=False)
+
+
+@app.post("/v1/responses")
+async def v1_responses(request: Request) -> Any:
+    return await _passthrough(request, "/responses", responses_shape=True)
+
+
+# =========================================================================== #
+# Anthropic-compatible endpoint
+# =========================================================================== #
+@app.post("/v1/messages")
+async def v1_messages(request: Request) -> Any:
+    client_key = _check_client_auth(request)
+    req = await request.json()
+    model = req.get("model")
+    stream = bool(req.get("stream"))
+
+    if not cc.is_authenticated():
+        raise HTTPException(status_code=503, detail="Hub not logged in to Copilot")
+
+    openai_payload = aa.anthropic_to_openai(req)
+    vision_headers = (
+        {"Copilot-Vision-Request": "true"}
+        if aa.has_image_content(openai_payload)
+        else None
+    )
+
+    if not stream:
+        openai_payload.pop("stream", None)
+        try:
+            status, data = await cc.post_json(
+                "/chat/completions", openai_payload, vision_headers
+            )
+        except cc.NotAuthenticatedError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        if status != 200:
+            _record(client_key=client_key, model=model, served=None,
+                    endpoint="messages", usage3=(0, 0, 0), streamed=False,
+                    estimated=False, status=status)
+            return JSONResponse(
+                {"type": "error", "error": {"type": "api_error",
+                 "message": json.dumps(data)}},
+                status_code=status,
+            )
+        anth = aa.openai_to_anthropic_response(data, model)
+        u = anth["usage"]
+        _record(client_key=client_key, model=model, served=data.get("model"),
+                endpoint="messages",
+                usage3=(u["input_tokens"], u["output_tokens"],
+                        u["input_tokens"] + u["output_tokens"]),
+                streamed=False, estimated=False)
+        return JSONResponse(anth)
+
+    # Streaming: translate OpenAI SSE -> Anthropic SSE.
+    openai_payload["stream"] = True
+    openai_payload.setdefault("stream_options", {"include_usage": True})
+    est_input = aa.estimate_prompt_tokens(openai_payload)
+
+    async def gen() -> AsyncIterator[bytes]:
+        final_usage: dict[str, Any] | None = None
+        try:
+            source = cc.stream("/chat/completions", openai_payload, vision_headers)
+            async for sse_bytes, usage in aa.stream_openai_to_anthropic(source, model):
+                if usage is not None:
+                    final_usage = usage
+                yield sse_bytes
+        finally:
+            i = (final_usage or {}).get("input_tokens", 0)
+            o = (final_usage or {}).get("output_tokens", 0)
+            # Copilot's streaming SSE usually omits prompt_tokens — fall back
+            # to a local estimate so input usage isn't silently lost.
+            input_estimated = not i
+            if input_estimated:
+                i = est_input
+            _record(client_key=client_key, model=model, served=None,
+                    endpoint="messages", usage3=(i, o, i + o),
+                    streamed=True, estimated=final_usage is None or input_estimated)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# =========================================================================== #
+# Management portal API
+# =========================================================================== #
+@app.post("/api/login")
+async def api_login(request: Request) -> Any:
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    if not store.verify_admin(username, password):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    return {"token": _new_session(), "username": username}
+
+
+@app.post("/api/logout")
+async def api_admin_logout(x_admin_token: str | None = Header(default=None)) -> Any:
+    if x_admin_token:
+        _SESSIONS.pop(x_admin_token, None)
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def api_me(x_admin_token: str | None = Header(default=None)) -> Any:
+    return {
+        "authenticated": _valid_session(x_admin_token)
+        or (bool(get_settings().admin_token)
+            and x_admin_token == get_settings().admin_token),
+        "username": store.get_admin_username(),
+    }
+
+
+@app.post("/api/admin/password")
+async def api_change_password(
+    request: Request, x_admin_token: str | None = Header(default=None)
+) -> Any:
+    _check_admin(x_admin_token)
+    body = await request.json()
+    new_username = (body.get("username") or store.get_admin_username()).strip()
+    new_password = body.get("password") or ""
+    if len(new_password) < 4:
+        raise HTTPException(status_code=400, detail="密码至少 4 位")
+    store.set_admin_credentials(new_username, new_password)
+    return {"ok": True}
+
+
+@app.get("/api/settings")
+async def api_get_settings(x_admin_token: str | None = Header(default=None)) -> Any:
+    _check_admin(x_admin_token)
+    s = get_settings()
+    return {
+        "require_auth": store.get_require_auth(s.require_auth),
+        "pricing": store.get_pricing(),
+    }
+
+
+@app.post("/api/settings")
+async def api_set_settings(
+    request: Request, x_admin_token: str | None = Header(default=None)
+) -> Any:
+    _check_admin(x_admin_token)
+    body = await request.json()
+    if "require_auth" in body:
+        store.set_require_auth(bool(body["require_auth"]))
+    if "pricing" in body and isinstance(body["pricing"], dict):
+        store.set_pricing(body["pricing"])
+    s = get_settings()
+    return {
+        "require_auth": store.get_require_auth(s.require_auth),
+        "pricing": store.get_pricing(),
+    }
+
+
+@app.get("/api/status")
+async def api_status() -> dict[str, Any]:
+    return {
+        "logged_in": cc.is_authenticated(),
+        "require_auth": store.get_require_auth(get_settings().require_auth),
+    }
+
+
+@app.post("/api/auth/device/start")
+async def api_device_start(x_admin_token: str | None = Header(default=None)) -> Any:
+    _check_admin(x_admin_token)
+    return await cc.device_flow_start()
+
+
+@app.post("/api/auth/device/poll")
+async def api_device_poll(
+    request: Request, x_admin_token: str | None = Header(default=None)
+) -> Any:
+    _check_admin(x_admin_token)
+    body = await request.json()
+    device_code = body.get("device_code")
+    if not device_code:
+        raise HTTPException(status_code=400, detail="device_code required")
+    return await cc.device_flow_poll(device_code)
+
+
+@app.post("/api/auth/copilot/logout")
+async def api_copilot_logout(x_admin_token: str | None = Header(default=None)) -> Any:
+    _check_admin(x_admin_token)
+    cc.logout()
+    return {"ok": True}
+
+
+@app.get("/api/models")
+async def api_models(x_admin_token: str | None = Header(default=None)) -> Any:
+    _check_admin(x_admin_token)
+    try:
+        models = await cc.list_models()
+    except cc.NotAuthenticatedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    chat_models = [
+        {
+            "id": m.get("id"),
+            "vendor": m.get("vendor"),
+            "type": (m.get("capabilities") or {}).get("type"),
+        }
+        for m in models
+    ]
+    return {"data": chat_models}
+
+
+@app.get("/api/usage")
+async def api_usage(
+    since: float | None = None,
+    until: float | None = None,
+    x_admin_token: str | None = Header(default=None),
+) -> Any:
+    _check_admin(x_admin_token)
+    return store.usage_summary_with_cost(since, until)
+
+
+@app.get("/api/usage/recent")
+async def api_usage_recent(
+    limit: int = 50, x_admin_token: str | None = Header(default=None)
+) -> Any:
+    _check_admin(x_admin_token)
+    return {"data": store.recent_usage(limit)}
+
+
+@app.get("/api/keys")
+async def api_keys_list(x_admin_token: str | None = Header(default=None)) -> Any:
+    _check_admin(x_admin_token)
+    return {"data": store.list_api_keys()}
+
+
+@app.post("/api/keys")
+async def api_keys_create(
+    request: Request, x_admin_token: str | None = Header(default=None)
+) -> Any:
+    _check_admin(x_admin_token)
+    body = await request.json()
+    name = (body.get("name") or "unnamed").strip()
+    return store.create_api_key(name)
+
+
+@app.delete("/api/keys/{key}")
+async def api_keys_revoke(
+    key: str, x_admin_token: str | None = Header(default=None)
+) -> Any:
+    _check_admin(x_admin_token)
+    store.revoke_api_key(key)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Portal (static)
+# --------------------------------------------------------------------------- #
+@app.get("/")
+async def index() -> FileResponse:
+    return FileResponse(_STATIC / "index.html")

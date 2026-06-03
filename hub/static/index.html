@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GitModel Hub</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3;
+          --muted:#8b949e; --accent:#2f81f7; --green:#3fb950; --red:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { padding:16px 24px; border-bottom:1px solid var(--border);
+           display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:18px; margin:0; }
+  .badge { font-size:12px; padding:3px 9px; border-radius:20px; border:1px solid var(--border); }
+  .badge.on { color:var(--green); border-color:var(--green); }
+  .badge.off { color:var(--red); border-color:var(--red); }
+  main { max-width:1000px; margin:0 auto; padding:24px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+          padding:20px; margin-bottom:20px; }
+  .card h2 { margin:0 0 14px; font-size:15px; }
+  .card h3 { font-size:13px; }
+  button { background:var(--accent); color:#fff; border:none; padding:8px 14px;
+           border-radius:6px; cursor:pointer; font-size:13px; }
+  button.ghost { background:transparent; border:1px solid var(--border); color:var(--fg); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input { background:#0d1117; border:1px solid var(--border); color:var(--fg);
+          padding:8px 10px; border-radius:6px; font-size:13px; }
+  code { background:#0d1117; padding:2px 6px; border-radius:4px; border:1px solid var(--border); }
+  pre { background:#0d1117; padding:12px; border-radius:8px; border:1px solid var(--border);
+        overflow:auto; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .code-head { display:flex; align-items:center; justify-content:space-between;
+    margin:14px 0 6px; }
+  .code-head .btn-copy { padding:3px 10px; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:600; }
+  .muted { color:var(--muted); font-size:13px; }
+  .login-box { background:#0d1117; border:1px dashed var(--border); border-radius:8px;
+               padding:16px; margin-top:12px; }
+  .big-code { font-size:26px; letter-spacing:4px; font-weight:700; color:var(--accent); }
+  .stat { display:flex; gap:14px; flex-wrap:wrap; }
+  .stat .n { font-size:22px; font-weight:700; display:block; margin-top:4px; }
+  .stat-box { flex:1; min-width:120px; background:#0d1117; border:1px solid var(--border);
+    border-radius:8px; padding:12px 14px; }
+  .stat-box .muted { font-size:12px; }
+  .stat-box.accent { border-color:var(--accent); }
+  .stat-box.accent .n { color:var(--accent); }
+  .chart { display:flex; align-items:flex-end; gap:6px; height:120px; padding:8px 0;
+    border-bottom:1px solid var(--border); overflow-x:auto; }
+  .bar { flex:0 0 auto; width:28px; display:flex; flex-direction:column; align-items:center;
+    gap:4px; justify-content:flex-end; height:100%; }
+  .bar .fill { width:100%; background:linear-gradient(180deg,var(--accent),#1f6feb);
+    border-radius:4px 4px 0 0; min-height:2px; transition:height .3s; }
+  .bar .lbl { font-size:10px; color:var(--muted); white-space:nowrap; }
+  .bar:hover .fill { background:linear-gradient(180deg,#58a6ff,var(--accent)); }
+  .table-scroll { max-height:360px; overflow:auto; }
+  .tag { font-size:11px; padding:1px 7px; border-radius:10px; border:1px solid var(--border); }
+  .tag-est { color:var(--muted); border-color:var(--muted); }
+  .tag-ok { color:var(--green); border-color:var(--green); }
+  .tag-err { color:var(--red); border-color:var(--red); }
+  .hidden { display:none; }
+  a { color:var(--accent); }
+  .key { font-family:monospace; font-size:12px; word-break:break-all; }
+  nav.tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:20px; }
+  nav.tabs button { background:transparent; border:none; color:var(--muted);
+    padding:10px 16px; border-bottom:2px solid transparent; border-radius:0; }
+  nav.tabs button.active { color:var(--fg); border-bottom-color:var(--accent); }
+  .tab-panel { display:none; }
+  .tab-panel.active { display:block; }
+  .login-screen { max-width:340px; margin:80px auto; }
+  .login-screen .card { padding:28px; }
+  .login-screen input { width:100%; margin-bottom:12px; }
+  .login-screen button { width:100%; }
+  .err { color:var(--red); font-size:13px; min-height:18px; }
+  .switch { position:relative; display:inline-block; width:46px; height:24px; }
+  .switch input { display:none; }
+  .slider { position:absolute; inset:0; background:#30363d; border-radius:24px; transition:.2s; }
+  .slider:before { content:""; position:absolute; height:18px; width:18px; left:3px; top:3px;
+    background:#fff; border-radius:50%; transition:.2s; }
+  .switch input:checked + .slider { background:var(--green); }
+  .switch input:checked + .slider:before { transform:translateX(22px); }
+</style>
+</head>
+<body>
+
+<!-- ===================== LOGIN SCREEN ===================== -->
+<div id="login-screen" class="login-screen hidden">
+  <div class="card">
+    <h2 style="text-align:center">GitModel Hub 后台登录</h2>
+    <input id="li-user" placeholder="用户名" value="admin" />
+    <input id="li-pass" type="password" placeholder="密码" />
+    <p class="err" id="li-err"></p>
+    <button id="li-btn">登录</button>
+    <p class="muted" style="text-align:center;margin:12px 0 0">默认账号 admin / admin</p>
+  </div>
+</div>
+
+<!-- ===================== APP ===================== -->
+<div id="app" class="hidden">
+<header>
+  <h1>GitModel Hub</h1>
+  <span id="status-badge" class="badge off">未登录</span>
+  <span class="muted" style="margin-left:auto" id="user-label"></span>
+  <button id="btn-admin-logout" class="ghost">退出后台</button>
+</header>
+
+<main>
+  <nav class="tabs">
+    <button data-tab="dashboard" class="active">概览</button>
+    <button data-tab="usage">用量统计</button>
+    <button data-tab="models">模型</button>
+    <button data-tab="keys">API Keys</button>
+    <button data-tab="settings">设置</button>
+  </nav>
+
+  <!-- DASHBOARD -->
+  <section class="tab-panel active" id="tab-dashboard">
+    <div class="stat" style="margin-bottom:20px">
+      <div class="stat-box"><span class="muted">今日请求</span><span class="n" id="d-req">0</span></div>
+      <div class="stat-box"><span class="muted">今日 tokens</span><span class="n" id="d-tok">0</span></div>
+      <div class="stat-box accent"><span class="muted">今日费用</span><span class="n" id="d-cost">$0.00</span></div>
+      <div class="stat-box"><span class="muted">有效 Key</span><span class="n" id="d-keys">0</span></div>
+    </div>
+    <div class="card">
+      <h2>GitHub Copilot 登录</h2>
+      <p class="muted">Hub 用你的 Copilot 订阅为下游客户端（Codex / Claude Code / OpenAI SDK）提供模型。</p>
+      <div class="row" style="margin-bottom:10px">
+        <span class="muted">后端状态：</span>
+        <span id="copilot-state" class="badge off">检查中…</span>
+      </div>
+      <div class="row">
+        <button id="btn-login">开始登录</button>
+        <button id="btn-copilot-logout" class="ghost">退出 Copilot</button>
+      </div>
+      <div id="login-box" class="login-box hidden">
+        <p class="muted">在浏览器打开 <a id="verif-uri" target="_blank"></a> 并输入下面的 code：</p>
+        <div class="big-code" id="user-code">----</div>
+        <p class="muted" id="login-state">等待授权…</p>
+      </div>
+    </div>
+    <div class="card">
+      <h2>客户端接入示例</h2>
+      <div class="code-head"><span class="muted">OpenAI / Codex</span>
+        <button class="ghost btn-copy" data-copy="ex-openai">复制</button></div>
+      <pre><code id="ex-openai"></code></pre>
+      <div class="code-head"><span class="muted">Claude Code（Anthropic）</span>
+        <button class="ghost btn-copy" data-copy="ex-anthropic">复制</button></div>
+      <pre><code id="ex-anthropic"></code></pre>
+    </div>
+  </section>
+
+  <!-- USAGE -->
+  <section class="tab-panel" id="tab-usage">
+    <div class="card">
+      <h2>Token 用量统计</h2>
+      <div class="row" style="margin-bottom:14px">
+        <label class="muted">起始</label><input type="date" id="from-date" />
+        <label class="muted">结束</label><input type="date" id="to-date" />
+        <button id="btn-refresh-usage" class="ghost">刷新</button>
+      </div>
+      <div class="stat">
+        <div class="stat-box"><span class="muted">请求数</span><span class="n" id="t-req">0</span></div>
+        <div class="stat-box"><span class="muted">输入 tokens</span><span class="n" id="t-in">0</span></div>
+        <div class="stat-box"><span class="muted">输出 tokens</span><span class="n" id="t-out">0</span></div>
+        <div class="stat-box"><span class="muted">总 tokens</span><span class="n" id="t-tot">0</span></div>
+        <div class="stat-box accent"><span class="muted">预估费用</span><span class="n" id="t-cost">$0.00</span></div>
+      </div>
+      <h3 class="muted" style="margin:22px 0 10px">按天趋势</h3>
+      <div id="by-day-chart" class="chart"></div>
+      <h3 class="muted" style="margin:22px 0 6px">按模型</h3>
+      <table><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>总计</th><th>预估费用</th></tr></thead>
+        <tbody id="by-model"></tbody></table>
+      <p class="muted" style="margin-top:10px">费用按「设置」页的单价表估算（美元 / 百万 token），仅供参考。</p>
+    </div>
+    <div class="card">
+      <h2>最近请求</h2>
+      <div class="table-scroll">
+        <table><thead><tr>
+          <th>时间</th><th>模型</th><th>端点</th><th>输入</th><th>输出</th>
+          <th>流式</th><th>状态</th>
+        </tr></thead>
+        <tbody id="recent-list"></tbody></table>
+      </div>
+      <p class="muted" style="margin-top:10px">
+        <span class="tag tag-est">估算</span> 表示后端未返回精确用量，输入 token 为本地估算值。
+      </p>
+    </div>
+  </section>
+
+  <!-- MODELS -->
+  <section class="tab-panel" id="tab-models">
+    <div class="card">
+      <h2>可用模型</h2>
+      <button id="btn-models" class="ghost">加载模型列表</button>
+      <table style="margin-top:12px"><thead><tr><th>ID</th><th>厂商</th><th>类型</th></tr></thead>
+        <tbody id="model-list"></tbody></table>
+    </div>
+  </section>
+
+  <!-- KEYS -->
+  <section class="tab-panel" id="tab-keys">
+    <div class="card">
+      <h2>客户端 API Key</h2>
+      <p class="muted">给 Codex / Claude Code 用的本地 key。开启「客户端鉴权」后，下游必须带这里的 key。</p>
+      <div class="row">
+        <input id="key-name" placeholder="名称，如 codex" />
+        <button id="btn-create-key">生成 Key</button>
+      </div>
+      <table style="margin-top:12px"><thead><tr><th>名称</th><th>Key</th><th>状态</th><th></th></tr></thead>
+        <tbody id="key-list"></tbody></table>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="tab-panel" id="tab-settings">
+    <div class="card">
+      <h2>客户端鉴权</h2>
+      <div class="row">
+        <label class="switch"><input type="checkbox" id="toggle-auth" /><span class="slider"></span></label>
+        <span id="auth-text" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top:10px">
+        开启后，下游客户端调用 <code>/v1/*</code> 必须带有效 API key（建议对外暴露时开启）。
+        关闭时本机任何请求都可直接调用。
+      </p>
+    </div>
+    <div class="card">
+      <h2>模型单价（美元 / 百万 token）</h2>
+      <p class="muted" style="margin:0 0 12px">
+        用于用量页的费用估算。<code>default</code> 为未列出模型的兜底单价。
+      </p>
+      <div class="table-scroll" style="max-height:300px">
+        <table><thead><tr><th>模型</th><th>输入单价</th><th>输出单价</th><th></th></tr></thead>
+          <tbody id="price-list"></tbody></table>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <input id="price-model" placeholder="模型名，如 claude-opus-4.7" />
+        <input id="price-in" type="number" step="0.01" min="0" placeholder="输入" style="width:90px" />
+        <input id="price-out" type="number" step="0.01" min="0" placeholder="输出" style="width:90px" />
+        <button id="btn-add-price" class="ghost">添加 / 更新</button>
+        <button id="btn-save-price">保存价格表</button>
+      </div>
+      <p class="err" id="price-msg"></p>
+    </div>
+    <div class="card">
+      <h2>修改后台账号</h2>
+      <div class="row" style="margin-bottom:10px">
+        <input id="set-user" placeholder="新用户名" />
+        <input id="set-pass" type="password" placeholder="新密码（≥4 位）" />
+        <button id="btn-save-cred">保存</button>
+      </div>
+      <p class="err" id="cred-msg"></p>
+    </div>
+  </section>
+</main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let TOKEN = localStorage.getItem("hub_session") || "";
+
+function authHeaders(json) {
+  const h = {};
+  if (json) h["Content-Type"] = "application/json";
+  if (TOKEN) h["x-admin-token"] = TOKEN;
+  return h;
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { ...authHeaders(opts.body != null), ...(opts.headers||{}) } });
+  if (r.status === 401) showLogin();
+  return r;
+}
+
+// ---------- Login gate ----------
+function showLogin() { $("login-screen").classList.remove("hidden"); $("app").classList.add("hidden"); }
+function showApp() { $("login-screen").classList.add("hidden"); $("app").classList.remove("hidden"); initApp(); }
+
+$("li-btn").onclick = async () => {
+  $("li-err").textContent = "";
+  const r = await fetch("/api/login", { method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ username: $("li-user").value, password: $("li-pass").value }) });
+  if (!r.ok) { const d = await r.json().catch(()=>({})); $("li-err").textContent = d.detail || "登录失败"; return; }
+  const d = await r.json();
+  TOKEN = d.token; localStorage.setItem("hub_session", TOKEN);
+  showApp();
+};
+$("li-pass").addEventListener("keydown", e => { if (e.key === "Enter") $("li-btn").click(); });
+
+$("btn-admin-logout").onclick = async () => {
+  await api("/api/logout", { method:"POST" });
+  TOKEN = ""; localStorage.removeItem("hub_session"); showLogin();
+};
+
+async function boot() {
+  if (!TOKEN) { showLogin(); return; }
+  const r = await fetch("/api/me", { headers: { "x-admin-token": TOKEN } });
+  const d = await r.json().catch(()=>({}));
+  if (d.authenticated) { $("user-label").textContent = "👤 " + d.username; showApp(); }
+  else showLogin();
+}
+
+// ---------- Tabs ----------
+document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav.tabs button").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  $("tab-" + b.dataset.tab).classList.add("active");
+  if (b.dataset.tab === "usage") refreshUsage();
+  else if (b.dataset.tab === "keys") refreshKeys();
+  else if (b.dataset.tab === "dashboard") refreshDashboard();
+});
+
+// ---------- App init ----------
+let appInited = false;
+function initApp() {
+  if (appInited) return; appInited = true;
+  refreshStatus(); refreshDashboard(); refreshUsage(); refreshKeys(); loadSettings();
+  setInterval(() => { refreshStatus(); refreshDashboard(); }, 15000);
+}
+
+// ---------- Copilot status ----------
+async function refreshStatus() {
+  const r = await fetch("/api/status"); const d = await r.json();
+  const b = $("status-badge");
+  b.textContent = d.logged_in ? "Copilot 已登录" : "Copilot 未登录";
+  b.className = "badge " + (d.logged_in ? "on" : "off");
+  const cs = $("copilot-state");
+  if (cs) {
+    cs.textContent = d.logged_in ? "已连接" : "未连接";
+    cs.className = "badge " + (d.logged_in ? "on" : "off");
+  }
+}
+
+// ---------- Dashboard quick stats ----------
+async function refreshDashboard() {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const since = Math.floor(start.getTime() / 1000);
+  const r = await api("/api/usage?since=" + since);
+  if (r.ok) {
+    const d = await r.json();
+    $("d-req").textContent = fmt(d.totals.requests);
+    $("d-tok").textContent = fmt(d.totals.total_tokens);
+    $("d-cost").textContent = money(d.totals.cost);
+  }
+  const rk = await api("/api/keys");
+  if (rk.ok) {
+    const dk = await rk.json();
+    $("d-keys").textContent = (dk.data || []).filter(k => !k.revoked).length;
+  }
+}
+
+// ---------- Copilot device flow ----------
+let flowId = 0;
+$("btn-login").onclick = async () => {
+  const myFlow = ++flowId;
+  $("btn-login").disabled = true;
+  $("login-state").textContent = "正在获取登录码…";
+  const r = await api("/api/auth/device/start", { method: "POST" });
+  if (!r.ok) { alert("启动登录失败"); $("btn-login").disabled = false; return; }
+  const d = await r.json();
+  $("login-box").classList.remove("hidden");
+  $("user-code").textContent = d.user_code;
+  const a = $("verif-uri"); a.href = d.verification_uri; a.textContent = d.verification_uri;
+  $("login-state").textContent = "等待授权…（请用上面这个 code）";
+  const deadline = Date.now() + d.expires_in * 1000;
+  let interval = (d.interval || 5) * 1000;
+  const poll = async () => {
+    if (myFlow !== flowId) return;
+    if (Date.now() > deadline) { $("login-state").textContent = "已超时，请重新点「开始登录」"; $("btn-login").disabled = false; return; }
+    let pd;
+    try {
+      const pr = await api("/api/auth/device/poll", { method:"POST", body: JSON.stringify({ device_code: d.device_code }) });
+      pd = await pr.json();
+    } catch (e) { setTimeout(poll, interval); return; }
+    if (myFlow !== flowId) return;
+    if (pd.status === "success") { $("login-state").textContent = "✅ 登录成功"; $("btn-login").disabled = false; refreshStatus(); refreshUsage(); return; }
+    if (pd.status === "error") { $("login-state").textContent = "❌ 失败：" + (pd.error || ""); $("btn-login").disabled = false; return; }
+    if (pd.error === "slow_down") { interval += 5000; $("login-state").textContent = "等待授权…（GitHub 限流，放慢轮询）"; }
+    else { $("login-state").textContent = "等待授权…（已在轮询，授权后会自动跳转）"; }
+    setTimeout(poll, interval);
+  };
+  setTimeout(poll, interval);
+};
+$("btn-copilot-logout").onclick = async () => {
+  flowId++; $("btn-login").disabled = false;
+  await api("/api/auth/copilot/logout", { method: "POST" });
+  $("login-box").classList.add("hidden");
+  refreshStatus();
+};
+
+// ---------- Usage ----------
+function fmt(n) { return (n||0).toLocaleString(); }
+function money(n) { return "$" + (Number(n)||0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:4}); }
+function esc(s) { return String(s==null?"":s).replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function shortModel(m) { return m ? esc(m).replace(/^claude-|^gpt-/, "") : "(未知)"; }
+
+function renderByDay(rows) {
+  const el = $("by-day-chart");
+  if (!rows || !rows.length) { el.innerHTML = `<span class="muted">暂无数据</span>`; return; }
+  const max = Math.max(...rows.map(r => r.total_tokens || 0), 1);
+  el.innerHTML = rows.map(r => {
+    const h = Math.round(((r.total_tokens || 0) / max) * 100);
+    const day = (r.day || "").slice(5); // MM-DD
+    return `<div class="bar" title="${esc(r.day)} · ${fmt(r.total_tokens)} tokens · ${fmt(r.requests)} 请求">
+      <div class="fill" style="height:${h}%"></div><div class="lbl">${day}</div></div>`;
+  }).join("");
+}
+
+async function refreshUsage() {
+  const params = new URLSearchParams();
+  const f = $("from-date").value, t = $("to-date").value;
+  if (f) params.set("since", Math.floor(new Date(f + "T00:00:00").getTime()/1000));
+  if (t) params.set("until", Math.floor(new Date(t + "T23:59:59").getTime()/1000));
+  const r = await api("/api/usage?" + params.toString());
+  if (!r.ok) return;
+  const d = await r.json();
+  $("t-req").textContent = fmt(d.totals.requests);
+  $("t-in").textContent = fmt(d.totals.input_tokens);
+  $("t-out").textContent = fmt(d.totals.output_tokens);
+  $("t-tot").textContent = fmt(d.totals.total_tokens);
+  $("t-cost").textContent = money(d.totals.cost);
+  renderByDay(d.by_day);
+  $("by-model").innerHTML = d.by_model.map(m =>
+    `<tr><td>${m.model?esc(m.model):"(未知)"}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.output_tokens)}</td><td>${fmt(m.total_tokens)}</td><td>${money(m.cost)}</td></tr>`
+  ).join("") || `<tr><td colspan="6" class="muted">暂无数据</td></tr>`;
+  refreshRecent();
+}
+
+async function refreshRecent() {
+  const r = await api("/api/usage/recent?limit=50");
+  if (!r.ok) return;
+  const d = await r.json();
+  $("recent-list").innerHTML = d.data.map(x => {
+    const t = new Date(x.ts * 1000);
+    const time = `${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")} ${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`;
+    const stTag = x.status === 200 ? `<span class="tag tag-ok">${x.status}</span>`
+      : `<span class="tag tag-err">${x.status}</span>`;
+    const inCell = x.estimated ? `${fmt(x.input_tokens)} <span class="tag tag-est">估算</span>` : fmt(x.input_tokens);
+    return `<tr><td>${time}</td><td>${shortModel(x.model)}</td><td>${esc(x.endpoint)}</td>
+      <td>${inCell}</td><td>${fmt(x.output_tokens)}</td>
+      <td>${x.streamed ? "✓" : ""}</td><td>${stTag}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">暂无记录</td></tr>`;
+}
+$("btn-refresh-usage").onclick = refreshUsage;
+
+// ---------- Models ----------
+$("btn-models").onclick = async () => {
+  const r = await api("/api/models");
+  if (!r.ok) { alert("加载失败，请先登录 Copilot"); return; }
+  const d = await r.json();
+  $("model-list").innerHTML = d.data.map(m =>
+    `<tr><td><code>${m.id}</code></td><td>${m.vendor||""}</td><td>${m.type||""}</td></tr>`
+  ).join("");
+};
+
+// ---------- Keys ----------
+async function refreshKeys() {
+  const r = await api("/api/keys"); if (!r.ok) return;
+  const d = await r.json();
+  $("key-list").innerHTML = d.data.map(k =>
+    `<tr><td>${k.name}</td><td class="key">${k.key}</td>
+     <td>${k.revoked ? "已吊销" : "有效"}</td>
+     <td>${k.revoked ? "" : `<button class="ghost" data-key="${k.key}">吊销</button>`}</td></tr>`
+  ).join("") || `<tr><td colspan="4" class="muted">暂无 key</td></tr>`;
+  document.querySelectorAll("#key-list button[data-key]").forEach(b =>
+    b.onclick = async () => { await api("/api/keys/" + encodeURIComponent(b.dataset.key), { method:"DELETE" }); refreshKeys(); });
+}
+$("btn-create-key").onclick = async () => {
+  const name = $("key-name").value || "unnamed";
+  const r = await api("/api/keys", { method:"POST", body: JSON.stringify({ name }) });
+  if (r.ok) { $("key-name").value = ""; refreshKeys(); }
+};
+
+// ---------- Settings ----------
+let PRICING = {};
+async function loadSettings() {
+  const r = await api("/api/settings"); if (!r.ok) return;
+  const d = await r.json();
+  $("toggle-auth").checked = !!d.require_auth;
+  setAuthText(d.require_auth);
+  PRICING = d.pricing || {};
+  renderPricing();
+}
+function setAuthText(on) { $("auth-text").textContent = on ? "已开启（下游需带 API key）" : "已关闭（本机任意请求可调用）"; }
+$("toggle-auth").onchange = async () => {
+  const on = $("toggle-auth").checked;
+  const r = await api("/api/settings", { method:"POST", body: JSON.stringify({ require_auth: on }) });
+  if (r.ok) { const d = await r.json(); $("toggle-auth").checked = !!d.require_auth; setAuthText(d.require_auth); }
+};
+
+// ---------- Pricing editor ----------
+function renderPricing() {
+  const names = Object.keys(PRICING).sort((a, b) =>
+    a === "default" ? -1 : b === "default" ? 1 : a.localeCompare(b));
+  $("price-list").innerHTML = names.map(m => {
+    const p = PRICING[m] || {};
+    const del = m === "default" ? "" : `<button class="ghost" data-del="${esc(m)}">删除</button>`;
+    return `<tr><td>${esc(m)}</td><td>$${(+p.input||0).toFixed(2)}</td><td>$${(+p.output||0).toFixed(2)}</td><td>${del}</td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="muted">暂无</td></tr>`;
+  document.querySelectorAll("#price-list button[data-del]").forEach(b =>
+    b.onclick = () => { delete PRICING[b.dataset.del]; renderPricing(); });
+}
+$("btn-add-price").onclick = () => {
+  const m = ($("price-model").value || "").trim();
+  if (!m) { $("price-msg").style.color = "var(--red)"; $("price-msg").textContent = "请填写模型名"; return; }
+  PRICING[m] = { input: parseFloat($("price-in").value) || 0, output: parseFloat($("price-out").value) || 0 };
+  $("price-model").value = $("price-in").value = $("price-out").value = "";
+  $("price-msg").textContent = "";
+  renderPricing();
+};
+$("btn-save-price").onclick = async () => {
+  $("price-msg").textContent = "";
+  const r = await api("/api/settings", { method:"POST", body: JSON.stringify({ pricing: PRICING }) });
+  if (r.ok) {
+    const d = await r.json(); PRICING = d.pricing || {}; renderPricing();
+    $("price-msg").style.color = "var(--green)"; $("price-msg").textContent = "已保存";
+  } else { $("price-msg").style.color = "var(--red)"; $("price-msg").textContent = "保存失败"; }
+};
+$("btn-save-cred").onclick = async () => {
+  $("cred-msg").textContent = "";
+  const r = await api("/api/admin/password", { method:"POST",
+    body: JSON.stringify({ username: $("set-user").value, password: $("set-pass").value }) });
+  const d = await r.json().catch(()=>({}));
+  if (r.ok) { $("cred-msg").style.color = "var(--green)"; $("cred-msg").textContent = "已保存，请重新登录"; setTimeout(() => $("btn-admin-logout").onclick(), 1200); }
+  else { $("cred-msg").style.color = "var(--red)"; $("cred-msg").textContent = d.detail || "保存失败"; }
+};
+
+// ---------- Examples ----------
+const base = location.origin;
+$("ex-openai").textContent =
+`export OPENAI_BASE_URL="${base}/v1"
+export OPENAI_API_KEY="<API Keys 标签页生成的 key>"
+# 模型: gpt-5.5 / gpt-4.1 / gpt-5.3-codex`;
+$("ex-anthropic").textContent =
+`export ANTHROPIC_BASE_URL="${base}"
+export ANTHROPIC_AUTH_TOKEN="<API Keys 标签页生成的 key>"
+# 模型: claude-sonnet-4.6 / claude-opus-4.7`;
+
+// ---------- Copy buttons ----------
+document.querySelectorAll(".btn-copy").forEach(b => b.onclick = async () => {
+  const text = $(b.dataset.copy).textContent;
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); ta.remove();
+  }
+  const old = b.textContent; b.textContent = "已复制 ✓";
+  setTimeout(() => { b.textContent = old; }, 1500);
+});
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Hub data (SQLite DB, Copilot token, admin credentials)
+db/
+db-container/
+*.db
+*.db-wal
+*.db-shm
+
+# Claude Code local config
+.claude/
+
+# Secrets / local config
+.env
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

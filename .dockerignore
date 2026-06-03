@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local data & secrets (never bake into the image)
+db/
+*.db
+*.db-wal
+*.db-shm
+.env
+
+# VCS / editor / OS
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docs / meta
+README.md
+Dockerfile
+.dockerignore
+docker-compose.yml
