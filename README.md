@@ -191,6 +191,40 @@ az storage account show-connection-string -n <账户名> -g <所在RG> --query c
 > 别的订阅也能直接用。连接字符串是机密，对应变量已标记 `sensitive`；`terraform.tfvars`
 > 已被 `.gitignore` 排除，**切勿提交**。
 
+### 可配置变量
+
+所有变量定义在 `infra/variables.tf`（`default` 即默认值）。除连接字符串外都有可用默认值，
+按需在 `terraform.tfvars` 覆盖，或用 `terraform apply -var="名=值"` 临时覆盖。
+**优先级**：`tfvars` / `-var` > `variables.tf` 的 `default`。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `storage_connection_string` | **（必填，无默认）** | 存储账户连接字符串，用于 `/data` 挂载 |
+| `resource_group_name` | `gitmodel-rg` | 新建的资源组名 |
+| `location` | `centralus` | Azure 区域 |
+| `prefix` | `gitmodel` | 资源名前缀（身份 / 环境 / App / ACR 名都基于它）|
+| `image_name` | `gitmodel` | 镜像仓库名（tag 由源码哈希自动生成）|
+| `file_share_name` | `gitmodel-data` | 挂载的 Azure Files share 名 |
+| `container_port` | `8088` | 容器内监听端口 |
+| `require_auth` | `true` | `HUB_REQUIRE_AUTH`，公网暴露时务必保持 |
+| `login_max_fails` | `5` | 登录失败锁定阈值（`0` 关闭限流）|
+| `login_lock_seconds` | `900` | 锁定时长（秒）|
+| `cpu` | `0.5` | 每副本 vCPU |
+| `memory` | `1.0Gi` | 每副本内存（需与 `cpu` 匹配）|
+
+部分资源名在 `main.tf` 中由 `prefix` 拼接而成：
+
+| 资源 | 命名规则 | 示例 |
+| --- | --- | --- |
+| 资源组 | `var.resource_group_name` | `gitmodel-rg` |
+| ACR | `${prefix}` + 随机 8 位后缀 | `gitmodel8df1h6i9` |
+| 托管身份 | `${prefix}-id` | `gitmodel-id` |
+| Container 环境 | `${prefix}-env` | `gitmodel-env` |
+| Container App | `${prefix}-hub` | `gitmodel-hub` |
+
+> ⚠️ **改名会触发重建**：`resource_group_name`、`prefix` 等是资源身份的一部分，
+> 部署后再修改会让 Terraform **销毁旧资源并重建**。这类名字请在**首次部署前**定好。
+
 > **公网暴露注意**：`ingress.external_enabled = true` 会把服务挂到公网。务必
 > ① 立即修改后台默认密码；② 保持 `HUB_REQUIRE_AUTH=true`；③ 视情况调低
 > `login_max_fails`。`terraform.tfvars` 与 `*.tfstate` 含敏感信息，已被 `.gitignore` 排除，**切勿提交**。
