@@ -1,15 +1,19 @@
 # Copy to terraform.tfvars and adjust. Run: terraform init && terraform apply
 
-# --- Required: point these at your existing Azure resources ---------------
-acr_name                       = "<your-acr-name>"
-acr_resource_group_name        = "<your-acr-resource-group>"
-storage_account_name           = "<your-storage-account>"
-storage_account_resource_group = "<your-storage-resource-group>"
-image_tag                      = "gitmodel:latest"
+# --- Required: connection string of an EXISTING storage account -----------
+# The account must allow shared-key access (allowSharedKeyAccess = true) and is
+# used for the /data Azure Files mount. account_name + access_key are parsed
+# from this string, so Terraform needs no RBAC on the account — it can live in
+# any subscription or tenant. Everything else (ACR, image build, resource
+# group...) is created by Terraform.
+# Get it with: az storage account show-connection-string -n <acct> -g <rg> --query connectionString -o tsv
+storage_connection_string = "DefaultEndpointsProtocol=https;AccountName=<acct>;AccountKey=<key>;EndpointSuffix=core.windows.net"
 
 # --- Optional overrides ---------------------------------------------------
 # resource_group_name = "gitmodel-rg"
 # location            = "centralus"
+# prefix              = "gitmodel"   # also used as the ACR name prefix
+# image_name          = "gitmodel"   # tag is auto-derived from a source hash
 # file_share_name     = "gitmodel-data"
 # require_auth        = true
 # login_max_fails     = 5     # failed admin logins per IP before lockout (0 = disable)

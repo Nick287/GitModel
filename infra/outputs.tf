@@ -6,3 +6,13 @@ output "app_url" {
 output "resource_group" {
   value = azurerm_resource_group.rg.name
 }
+
+output "acr_login_server" {
+  description = "Login server of the container registry created for this app."
+  value       = azurerm_container_registry.acr.login_server
+}
+
+output "image" {
+  description = "Image repository:tag (tag is the source content hash) built and deployed."
+  value       = local.image_ref
+}

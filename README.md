@@ -44,6 +44,38 @@ python -m hub
 2. 在「概览」点击「开始登录」，按提示完成 GitHub 授权（Device Flow）。
 3. 在「API Keys」生成一个 key 给下游客户端使用。
 
+### Dev Container
+
+已内置 [Dev Container](https://containers.dev/) 配置（`.devcontainer/devcontainer.json`），
+基于官方 `python:3.13` 镜像（与生产对齐），用 **pip** 安装依赖。
+
+在 VS Code 中安装 **Dev Containers** 扩展后，命令面板执行
+**Dev Containers: Reopen in Container**，容器创建时会自动
+`pip install -r requirements.txt`。随后在容器内运行：
+
+```bash
+python -m hub
+```
+
+容器已绑定 `0.0.0.0:8088` 并转发到宿主机，浏览器打开 `http://localhost:8088` 即可。
+
+#### 内置工具与部署
+
+容器通过 Dev Container Features 预装了 **Terraform** 与 **Azure CLI**，可直接在容器内
+部署 `infra/`（见下方 Azure 一节）。首次部署前需先登录 Azure：
+
+```bash
+az login        # 无浏览器环境会给出 device code，在宿主机浏览器完成
+cd infra && terraform apply
+```
+
+> ⚠️ **Terraform 版本对齐**：容器内的 Terraform 锁定为 `1.9.8`，与宿主机工具链一致。
+> 因为 `infra/terraform.tfstate` 在宿主机与容器间共享，而 state 文件**不向后兼容**，
+> 切勿在容器内升级 Terraform，否则宿主机将无法再读取该 state。
+>
+> `.devcontainer/devcontainer-lock.json` 锁定了 Features 的精确版本（类似
+> `package-lock.json`），请一并提交以保证团队/CI 构建一致。
+
 ### Docker
 
 ```bash
@@ -119,18 +151,45 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 ## ☁️ 部署到 Azure（可选）
 
-`infra/` 提供一套 Terraform，将网关部署到 **Azure Container Apps**：
+`infra/` 提供一套 Terraform，**一条 `terraform apply` 即可**完成「创建专属 ACR →
+在云端构建镜像（`az acr build`，无需本地 docker）→ 部署到 Azure Container Apps」：
 
-- 用 user-assigned identity 从既有 ACR 拉镜像（无需 admin 凭据）
+- 自动新建一个 Basic SKU 的 ACR（随机后缀命名，规避全球唯一名冲突）
+- 镜像 tag 由源码（`hub/` + `Dockerfile` + `requirements.txt`）内容哈希自动生成：
+  **改了代码再 `apply` 就会自动重建并滚动出新 revision**，不动代码则 apply 幂等、不重复构建
+- 用 user-assigned identity 从该 ACR 拉镜像（无需 admin 凭据）
 - Azure Files 挂载到 `/data` 持久化 SQLite
 - 单副本（SQLite 为 WAL 单写者，**切勿多副本**）
 
+### 前置条件
+
+绝大多数资源由 Terraform 自动创建，**唯一需要事先准备**的是一个用于 `/data`
+持久化的**存储账户**（Terraform 只读引用它，不负责创建）：
+
+- 该存储账户**必须已存在**，并**允许 shared key 访问**（`allowSharedKeyAccess = true`）——
+  Container Apps 挂载 Azure Files 依赖 key 认证
+- 里面需有一个 file share（名字默认 `gitmodel-data`，可用 `file_share_name` 改）
+
+### 部署
+
 ```bash
 cd infra
-cp terraform.tfvars.example terraform.tfvars   # 填入你的 ACR / 存储账号等
+cp terraform.tfvars.example terraform.tfvars   # 填入存储账户的 connection string
 terraform init
 terraform apply
 ```
+
+`terraform.tfvars` 里**只有一个值必须填**：`storage_connection_string`（存储账户的连接字符串）。
+其余（资源组名、区域、ACR 名、镜像名/tag…）都有可用默认值。获取连接字符串：
+
+```bash
+az storage account show-connection-string -n <账户名> -g <所在RG> --query connectionString -o tsv
+```
+
+> **为什么用 connection string**：Terraform 从中解析出 `account_name` 和 `access_key`，
+> **不需要**对存储账户有任何 RBAC 权限，也**不关心它在哪个订阅 / 租户**——存储账户在
+> 别的订阅也能直接用。连接字符串是机密，对应变量已标记 `sensitive`；`terraform.tfvars`
+> 已被 `.gitignore` 排除，**切勿提交**。
 
 > **公网暴露注意**：`ingress.external_enabled = true` 会把服务挂到公网。务必
 > ① 立即修改后台默认密码；② 保持 `HUB_REQUIRE_AUTH=true`；③ 视情况调低

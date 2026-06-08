@@ -16,38 +16,20 @@ variable "prefix" {
   default     = "gitmodel"
 }
 
-# --- Container image (already pushed to ACR) ------------------------------
+# --- Container image (built in-cloud by `az acr build`) -------------------
 
-variable "acr_name" {
+variable "image_name" {
   type        = string
-  description = "Name of the existing Azure Container Registry (without .azurecr.io)."
-  default     = "<your-acr-name>"
-}
-
-variable "acr_resource_group_name" {
-  type        = string
-  description = "Resource group that contains the existing ACR."
-  default     = "<your-acr-resource-group>"
-}
-
-variable "image_tag" {
-  type        = string
-  description = "Image repository:tag inside the ACR."
-  default     = "gitmodel:latest"
+  description = "Image repository name inside the registry. The tag is derived automatically from a hash of the source (hub/, Dockerfile, requirements.txt)."
+  default     = "gitmodel"
 }
 
 # --- Persistent storage (existing account that allows shared keys) ---------
 
-variable "storage_account_name" {
+variable "storage_connection_string" {
   type        = string
-  description = "Existing storage account used for the /data Azure Files mount (must allow shared key access)."
-  default     = "<your-storage-account>"
-}
-
-variable "storage_account_resource_group" {
-  type        = string
-  description = "Resource group that contains the storage account."
-  default     = "<your-storage-resource-group>"
+  sensitive   = true
+  description = "Connection string of an existing storage account (must allow shared key access) used for the /data Azure Files mount. account_name and access_key are parsed from it, so Terraform needs no RBAC on the account — works across subscriptions/tenants."
 }
 
 variable "file_share_name" {

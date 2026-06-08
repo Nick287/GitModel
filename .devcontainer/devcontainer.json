@@ -1,0 +1,55 @@
+// GitModel Hub dev container.
+// Docs: https://containers.dev/implementors/json_reference/
+{
+  "name": "GitModel Hub",
+
+  // Standard Microsoft dev container image. Ships git, zsh, a non-root
+  // "vscode" user and common dev tooling. Python 3.13 matches the production
+  // Dockerfile (python:3.13-slim) so local and prod stay in sync.
+  "image": "mcr.microsoft.com/devcontainers/python:3.13",
+
+  // Expose the hub's HTTP port to the host.
+  "forwardPorts": [8088],
+  "portsAttributes": {
+    "8088": {
+      "label": "GitModel Hub",
+      "onAutoForward": "notify"
+    }
+  },
+
+  // Dev tooling installed into the container.
+  // - terraform is pinned to 1.9.8 to match the host toolchain: terraform
+  //   state files are NOT backward-compatible, and infra/terraform.tfstate is
+  //   shared between host and container via this workspace folder. A newer
+  //   terraform would upgrade the state and lock the host out.
+  // - azure-cli is required for terraform's azurerm provider to authenticate.
+  "features": {
+    "ghcr.io/devcontainers/features/terraform:1": {
+      "version": "1.9.8"
+    },
+    "ghcr.io/devcontainers/features/azure-cli:1": {}
+  },
+
+  // Install dependencies with pip after the container is created.
+  "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "hashicorp.terraform"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  },
+
+  // Bind to all interfaces so VS Code port forwarding reaches the server.
+  // (config.py defaults HUB_HOST to 127.0.0.1.)
+  "remoteEnv": {
+    "HUB_HOST": "0.0.0.0",
+    "HUB_PORT": "8088"
+  }
+}

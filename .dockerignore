@@ -11,10 +11,18 @@ env/
 
 # Local data & secrets (never bake into the image)
 db/
+db-container/
 *.db
 *.db-wal
 *.db-shm
 .env
+
+# Infra / tooling — not part of the app image. infra/.terraform holds large
+# provider binaries that are also locked during `terraform apply`, which would
+# break `az acr build`'s context packing.
+infra/
+.claude/
+.devcontainer/
 
 # VCS / editor / OS
 .git/
