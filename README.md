@@ -167,11 +167,15 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 ### 前置条件
 
 绝大多数资源由 Terraform 自动创建，**唯一需要事先准备**的是一个用于 `/data`
-持久化的**存储账户**（Terraform 只读引用它，不负责创建）：
+持久化的**存储账户**（Terraform 不负责创建它，只用它的 connection string）：
 
 - 该存储账户**必须已存在**，并**允许 shared key 访问**（`allowSharedKeyAccess = true`）——
   Container Apps 挂载 Azure Files 依赖 key 认证
-- 里面需有一个 file share（名字默认 `gitmodel-data`，可用 `file_share_name` 改）
+
+> 只需提供存储账户的 connection string，其余**全自动**：file share（默认
+> `gitmodel-data`，可用 `file_share_name` 改）凭 connection string 里的 key 在
+> 挂载时自动创建；SQLite 数据库与表结构由应用启动时（`store.py` 的 `init_db()`）
+> 自动建立。换言之，给一个**空的存储账户**即可，无需预先建 share 或初始化数据库。
 
 ### 部署
 
