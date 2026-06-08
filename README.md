@@ -31,7 +31,10 @@ GitHub 登录、token 用量统计与费用估算、API key 管理。
 
 ## 🚀 快速开始
 
-### 本地运行
+### 本地运行（可选）
+
+> 不想在宿主机安装 Python？直接用下面的 [Dev Container](#dev-container)，
+> 环境与依赖都在容器内自动就绪。
 
 ```powershell
 pip install -r requirements.txt
