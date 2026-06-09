@@ -199,6 +199,11 @@ DEFAULT_PRICING: dict[str, dict[str, float]] = {
     "gpt-4.1": {"input": 2.0, "output": 8.0},
     "gpt-5.5": {"input": 1.25, "output": 10.0},
     "gpt-5.3-codex": {"input": 1.25, "output": 10.0},
+    # Google Gemini (rates observed from Copilot's copilot_usage payload)
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
+    "gemini-3-flash-preview": {"input": 0.50, "output": 3.0},
+    "gemini-3.1-pro-preview": {"input": 2.0, "output": 12.0},
+    "gemini-3.5-flash": {"input": 1.5, "output": 9.0},
 }
 
 

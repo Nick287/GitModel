@@ -291,6 +291,9 @@
       <div class="code-head"><span class="muted">Claude Code（Anthropic）</span>
         <button class="ghost btn-copy" data-copy="ex-anthropic">复制</button></div>
       <pre><code id="ex-anthropic"></code></pre>
+      <div class="code-head"><span class="muted">Google Gemini（OpenAI 兼容）</span>
+        <button class="ghost btn-copy" data-copy="ex-gemini">复制</button></div>
+      <pre><code id="ex-gemini"></code></pre>
     </div>
   </section>
 
@@ -706,6 +709,13 @@ $("ex-anthropic").textContent =
 `export ANTHROPIC_BASE_URL="${base}"
 export ANTHROPIC_AUTH_TOKEN="<API Keys 标签页生成的 key>"
 # 模型: claude-sonnet-4.6 / claude-opus-4.7`;
+$("ex-gemini").textContent =
+`# Gemini 走 OpenAI 兼容端点最稳；它是推理模型，max_tokens 请给大些
+curl ${base}/v1/chat/completions \\
+  -H "Authorization: Bearer <API Keys 标签页生成的 key>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"gemini-2.5-pro","max_tokens":2048,"messages":[{"role":"user","content":"say ok"}]}'
+# 模型: gemini-2.5-pro / gemini-3-flash-preview / gemini-3.1-pro-preview / gemini-3.5-flash`;
 
 // ---------- Copy buttons ----------
 document.querySelectorAll(".btn-copy").forEach(b => b.onclick = async () => {

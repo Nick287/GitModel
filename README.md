@@ -122,6 +122,18 @@ export ANTHROPIC_AUTH_TOKEN="<门户生成的 key>"
 # 模型: claude-sonnet-4.6 / claude-opus-4.7 ...
 ```
 
+### Google Gemini（OpenAI 兼容）
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:8088/v1"
+export OPENAI_API_KEY="<门户生成的 key>"
+# 模型: gemini-2.5-pro / gemini-3-flash-preview / gemini-3.1-pro-preview / gemini-3.5-flash
+```
+
+> **注意**：Gemini 是推理模型，可见输出前会先消耗大量 reasoning token，`max_tokens`
+> 请给大些（如 `2048`），否则容易被推理占满导致输出被截断。建议走上面的
+> **OpenAI 兼容端点**（`/v1/chat/completions`），路径最直接。
+
 > **模型名兼容**：直接传 Copilot 的 slug（如 `claude-sonnet-4.6`）即可；也支持官方
 > Anthropic 模型 ID（如 `claude-3-5-sonnet-20241022`、`claude-sonnet-4-5-20250929`），
 > 网关会自动映射到对应的 Copilot slug，未识别的名字按原样透传。映射表见
