@@ -59,7 +59,7 @@ def _conn() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(db, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute(f"PRAGMA journal_mode={get_settings().journal_mode};")
         yield conn
         conn.commit()
     finally:

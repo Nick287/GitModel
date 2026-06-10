@@ -26,20 +26,31 @@ resource "azurerm_resource_group" "rg" {
   location = var.location
 }
 
-# --- Container registry (created + image built in-cloud) ------------------
-
-resource "random_string" "acr_suffix" {
-  length  = 8
-  upper   = false
-  special = false
-}
+# --- Container registry (create if missing, else use existing) ------------
+#
+# Terraform can't probe for existence at plan time, so `create_acr` selects the
+# mode: true -> create a new registry; false -> look up an existing one. Either
+# way the rest of the config reads through local.acr_* so nothing else changes.
 
 resource "azurerm_container_registry" "acr" {
-  name                = "${var.prefix}${random_string.acr_suffix.result}"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
+  count               = var.create_acr ? 1 : 0
+  name                = var.acr_name
+  resource_group_name = var.acr_resource_group_name
+  location            = var.location
   sku                 = "Basic" # supports ACR Tasks (cloud build) + MI pull
   admin_enabled       = false
+}
+
+data "azurerm_container_registry" "acr" {
+  count               = var.create_acr ? 0 : 1
+  name                = var.acr_name
+  resource_group_name = var.acr_resource_group_name
+}
+
+locals {
+  acr_id           = var.create_acr ? azurerm_container_registry.acr[0].id : data.azurerm_container_registry.acr[0].id
+  acr_name         = var.create_acr ? azurerm_container_registry.acr[0].name : data.azurerm_container_registry.acr[0].name
+  acr_login_server = var.create_acr ? azurerm_container_registry.acr[0].login_server : data.azurerm_container_registry.acr[0].login_server
 }
 
 # Cloud build via ACR Tasks — uploads the build context and builds/pushes the
@@ -62,11 +73,9 @@ resource "terraform_data" "build" {
       cp "$ctx/Dockerfile" "$ctx/requirements.txt" "$staging/"
       cp -r "$ctx/hub" "$staging/hub"
       find "$staging/hub" -name __pycache__ -type d -prune -exec rm -rf {} +
-      az acr build --registry ${azurerm_container_registry.acr.name} --image ${local.image_ref} "$staging"
+      az acr build --registry ${local.acr_name} --image ${local.image_ref} "$staging"
     EOT
   }
-
-  depends_on = [azurerm_container_registry.acr]
 }
 
 # --- Identity used by the Container App to pull from ACR ------------------
@@ -78,7 +87,7 @@ resource "azurerm_user_assigned_identity" "app" {
 }
 
 resource "azurerm_role_assignment" "acr_pull" {
-  scope                = azurerm_container_registry.acr.id
+  scope                = local.acr_id
   role_definition_name = "AcrPull"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
@@ -124,7 +133,7 @@ resource "azurerm_container_app" "hub" {
   }
 
   registry {
-    server   = azurerm_container_registry.acr.login_server
+    server   = local.acr_login_server
     identity = azurerm_user_assigned_identity.app.id
   }
 
@@ -147,17 +156,32 @@ resource "azurerm_container_app" "hub" {
       name         = "data"
       storage_type = "AzureFile"
       storage_name = azurerm_container_app_environment_storage.data.name
+      # SQLite needs file locking that Azure Files (SMB) byte-range locks don't
+      # provide, causing "database is locked". nobrl disables byte-range locks
+      # (safe with a single replica = single writer). Paired with a non-WAL
+      # journal mode (HUB_DB_JOURNAL_MODE) since WAL's -shm mmap is unsupported
+      # on SMB too.
+      mount_options = "nobrl"
     }
 
     container {
       name   = "${var.prefix}-hub"
-      image  = "${azurerm_container_registry.acr.login_server}/${local.image_ref}"
+      image  = "${local.acr_login_server}/${local.image_ref}"
       cpu    = var.cpu
       memory = var.memory
 
       env {
         name  = "HUB_DATA_DIR"
         value = "/data"
+      }
+
+      # /data is an Azure Files (SMB) mount; SQLite WAL relies on mmap shared
+      # memory unavailable there and fails with "database is locked". Use a
+      # rollback-journal mode that works on network filesystems (safe here
+      # because the app runs as a single replica = single writer).
+      env {
+        name  = "HUB_DB_JOURNAL_MODE"
+        value = "TRUNCATE"
       }
 
       env {

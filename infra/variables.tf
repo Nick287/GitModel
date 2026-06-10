@@ -16,6 +16,26 @@ variable "prefix" {
   default     = "gitmodel"
 }
 
+# --- Container registry (create if missing, else use existing) ------------
+
+variable "create_acr" {
+  type        = bool
+  description = "true: create a new Azure Container Registry named acr_name. false: use an existing registry with that name. Terraform can't auto-detect existence, so set this to match reality."
+  default     = false
+}
+
+variable "acr_name" {
+  type        = string
+  description = "Name of the Azure Container Registry to build into and pull from (created when create_acr = true, otherwise looked up)."
+  default     = "azureaidemoacr"
+}
+
+variable "acr_resource_group_name" {
+  type        = string
+  description = "Resource group of the Azure Container Registry."
+  default     = "rg-azureaidemo"
+}
+
 # --- Container image (built in-cloud by `az acr build`) -------------------
 
 variable "image_name" {
