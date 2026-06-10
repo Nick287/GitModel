@@ -85,6 +85,7 @@
     box-shadow:none;
   }
   button.ghost:hover { background:#222a38; border-color:#454d5a; filter:none; box-shadow:none; }
+  button.ghost.btn-dim.active { background:var(--panel2); border-color:var(--accent); color:var(--accent); }
   button.danger { background:transparent; border:1px solid rgba(248,81,73,.4); color:var(--red); box-shadow:none; }
   button.danger:hover { background:rgba(248,81,73,.12); filter:none; box-shadow:none; }
   button:disabled { opacity:.45; cursor:not-allowed; filter:none; box-shadow:none; transform:none; }
@@ -301,6 +302,13 @@
   <section class="tab-panel" id="tab-usage">
     <div class="card">
       <h2>Token 用量统计</h2>
+      <div class="row" style="margin-bottom:10px;flex-wrap:wrap;gap:6px">
+        <button class="ghost btn-range" data-days="0">当天</button>
+        <button class="ghost btn-range" data-days="3">最近 3 天</button>
+        <button class="ghost btn-range" data-days="7">最近一周</button>
+        <button class="ghost btn-range" data-days="15">最近 15 天</button>
+        <button class="ghost btn-range" data-days="30">最近一个月</button>
+      </div>
       <div class="row" style="margin-bottom:14px">
         <label class="muted">起始</label><input type="date" id="from-date" />
         <label class="muted">结束</label><input type="date" id="to-date" />
@@ -316,9 +324,14 @@
       </div>
       <h3 class="muted" style="margin:22px 0 10px">按天趋势</h3>
       <div id="by-day-chart" class="chart"></div>
-      <h3 class="muted" style="margin:22px 0 6px">按模型</h3>
-      <table><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>缓存命中</th><th>输出</th><th>总计</th><th>预估费用</th></tr></thead>
+      <div class="row" style="margin:22px 0 6px;gap:6px">
+        <button class="ghost btn-dim active" data-dim="model">按模型</button>
+        <button class="ghost btn-dim" data-dim="key">按 API Key</button>
+      </div>
+      <table id="tbl-by-model"><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>缓存命中</th><th>输出</th><th>总计</th><th>预估费用</th></tr></thead>
         <tbody id="by-model"></tbody></table>
+      <table id="tbl-by-key" style="display:none"><thead><tr><th>API Key</th><th>请求</th><th>输入</th><th>缓存命中</th><th>输出</th><th>总计</th><th>预估费用</th></tr></thead>
+        <tbody id="by-key"></tbody></table>
       <p class="muted" style="margin-top:10px">费用按「设置」页的单价表估算（美元 / 百万 token），缓存命中部分按 <code>cache_read</code> 单价（默认为输入价的 0.1×）折算，仅供参考。</p>
     </div>
     <div class="card">
@@ -587,6 +600,11 @@ async function refreshUsage() {
   $("by-model").innerHTML = d.by_model.map(m =>
     `<tr><td>${m.model?esc(m.model):"(未知)"}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.cached_tokens)}</td><td>${fmt(m.output_tokens)}</td><td>${fmt(m.total_tokens)}</td><td>${money(m.cost)}</td></tr>`
   ).join("") || `<tr><td colspan="7" class="muted">暂无数据</td></tr>`;
+  $("by-key").innerHTML = (d.by_api_key || []).map(k => {
+    const label = k.key_name ? esc(k.key_name)
+      : (k.key ? `<span class="muted">…${esc(String(k.key).slice(-6))}</span>` : `<span class="muted">匿名</span>`);
+    return `<tr><td>${label}</td><td>${fmt(k.requests)}</td><td>${fmt(k.input_tokens)}</td><td>${fmt(k.cached_tokens)}</td><td>${fmt(k.output_tokens)}</td><td>${fmt(k.total_tokens)}</td><td>${money(k.cost)}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">暂无数据</td></tr>`;
   refreshRecent();
 }
 
@@ -607,6 +625,29 @@ async function refreshRecent() {
   }).join("") || `<tr><td colspan="8" class="muted">暂无记录</td></tr>`;
 }
 $("btn-refresh-usage").onclick = refreshUsage;
+
+// 快捷时段:当天=今天;最近N天=今天往前 N-1 天。填入日期框并刷新。
+function ymd(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+document.querySelectorAll(".btn-range").forEach(b => b.onclick = () => {
+  const days = +b.dataset.days;
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - days);
+  $("from-date").value = ymd(from);
+  $("to-date").value = ymd(to);
+  refreshUsage();
+});
+
+// 按模型 / 按 API Key 切换
+document.querySelectorAll(".btn-dim").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".btn-dim").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  const byKey = b.dataset.dim === "key";
+  $("tbl-by-model").style.display = byKey ? "none" : "";
+  $("tbl-by-key").style.display = byKey ? "" : "none";
+});
 
 // ---------- Models ----------
 $("btn-models").onclick = async () => {
