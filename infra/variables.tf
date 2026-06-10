@@ -24,17 +24,11 @@ variable "image_name" {
   default     = "gitmodel"
 }
 
-# --- Persistent storage (existing account that allows shared keys) ---------
-
-variable "storage_connection_string" {
-  type        = string
-  sensitive   = true
-  description = "Connection string of an existing storage account (must allow shared key access) used for the /data Azure Files mount. account_name and access_key are parsed from it, so Terraform needs no RBAC on the account — works across subscriptions/tenants."
-}
+# --- Persistent storage (created by Terraform in the app's resource group) -
 
 variable "file_share_name" {
   type        = string
-  description = "Azure Files share mounted at /data."
+  description = "Azure Files share (created by Terraform) mounted at /data."
   default     = "gitmodel-data"
 }
 

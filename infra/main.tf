@@ -1,5 +1,7 @@
 locals {
   # SQLite is WAL-mode and single-writer: never run more than one replica.
+  # (The Azure Files SMB mount uses nobrl so locking works — see the volume
+  # block on azurerm_container_app.hub.)
   replicas = 1
 
   # Build context is the repo root (one level up from this module).
@@ -24,6 +26,16 @@ locals {
 resource "azurerm_resource_group" "rg" {
   name     = var.resource_group_name
   location = var.location
+
+  # SecurityControl=Ignore MUST be present the instant the RG is created, so the
+  # org security policy doesn't block resources (e.g. the storage account) made
+  # inside it. In Terraform, tags are part of the RG's create API call — they're
+  # applied atomically with the RG, before anything that depends on it. Every
+  # resource below references azurerm_resource_group.rg, so they are all created
+  # strictly after this tag exists.
+  tags = {
+    SecurityControl = "Ignore"
+  }
 }
 
 # --- Container registry (created + image built in-cloud) ------------------
@@ -85,14 +97,34 @@ resource "azurerm_role_assignment" "acr_pull" {
 
 # --- Persistent storage for /data -----------------------------------------
 #
-# Uses an existing storage account that allows shared keys (Container Apps'
-# Azure Files mount requires key-based auth). The account name + key are parsed
-# straight out of the connection string, so Terraform needs no RBAC on the
-# account — it can live in any subscription or tenant.
+# A dedicated storage account + file share, created in the SAME resource group
+# as the app. Container Apps' Azure Files mount requires shared-key auth, so the
+# account keeps shared_access_key_enabled = true. The account name needs to be
+# globally unique, so a random suffix is appended (like the ACR above).
 
-locals {
-  storage_account_name = regex("AccountName=([^;]+)", var.storage_connection_string)[0]
-  storage_access_key   = regex("AccountKey=([^;]+)", var.storage_connection_string)[0]
+resource "random_string" "storage_suffix" {
+  length  = 8
+  upper   = false
+  special = false
+}
+
+resource "azurerm_storage_account" "data" {
+  name                      = "${var.prefix}${random_string.storage_suffix.result}"
+  resource_group_name       = azurerm_resource_group.rg.name
+  location                  = azurerm_resource_group.rg.location
+  account_tier              = "Standard"
+  account_replication_type  = "LRS"
+  shared_access_key_enabled = true
+  # The /data share holds the SQLite DB; nothing here should ever be anonymously
+  # reachable. Pin blob public access off (also the org-policy default), which
+  # keeps `terraform plan` clean instead of drifting back to the schema default.
+  allow_nested_items_to_be_public = false
+}
+
+resource "azurerm_storage_share" "data" {
+  name               = var.file_share_name
+  storage_account_id = azurerm_storage_account.data.id
+  quota              = 5
 }
 
 # --- Container Apps environment + app -------------------------------------
@@ -106,10 +138,18 @@ resource "azurerm_container_app_environment" "env" {
 resource "azurerm_container_app_environment_storage" "data" {
   name                         = "${var.prefix}-data"
   container_app_environment_id = azurerm_container_app_environment.env.id
-  account_name                 = local.storage_account_name
-  access_key                   = local.storage_access_key
-  share_name                   = var.file_share_name
+  account_name                 = azurerm_storage_account.data.name
+  access_key                   = azurerm_storage_account.data.primary_access_key
+  share_name                   = azurerm_storage_share.data.name
   access_mode                  = "ReadWrite"
+
+  # An env storage can't be deleted while the app's volume still references it.
+  # create_before_destroy flips the replace order to: create the new storage →
+  # repoint the app volume → delete the old storage, avoiding the
+  # ManagedEnvironmentStorageDeleteInUse error on a destroy-first replace.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "azurerm_container_app" "hub" {
@@ -147,6 +187,11 @@ resource "azurerm_container_app" "hub" {
       name         = "data"
       storage_type = "AzureFile"
       storage_name = azurerm_container_app_environment_storage.data.name
+      # SQLite needs file locking that Azure Files SMB doesn't fully provide,
+      # causing "database is locked" when first creating the db on a fresh
+      # share. nobrl disables byte-range locking (safe with a single replica =
+      # single writer); WAL journal mode keeps working over SMB.
+      mount_options = "nobrl"
     }
 
     container {
