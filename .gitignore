@@ -40,3 +40,5 @@ _read_token.py
 .idea/
 .DS_Store
 Thumbs.db
+
+terraform.tfvars

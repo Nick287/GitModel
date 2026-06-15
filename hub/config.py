@@ -79,6 +79,15 @@ class Settings:
 
         self.db_path = self.data_dir / "hub.db"
 
+        # SQLite journal mode. Defaults to WAL (fast, single-writer friendly)
+        # for local disks. WAL relies on memory-mapped shared memory and does
+        # NOT work on network filesystems such as Azure Files (SMB), where it
+        # fails with "database is locked"; set HUB_DB_JOURNAL_MODE=TRUNCATE (or
+        # DELETE) there. Only valid SQLite modes are accepted.
+        _jm = os.environ.get("HUB_DB_JOURNAL_MODE", "WAL").strip().upper()
+        _valid = {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}
+        self.journal_mode = _jm if _jm in _valid else "WAL"
+
         # Network binding for the server.
         self.host = os.environ.get("HUB_HOST", "127.0.0.1")
         self.port = int(os.environ.get("HUB_PORT", "8088"))

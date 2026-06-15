@@ -8,8 +8,8 @@ output "resource_group" {
 }
 
 output "acr_login_server" {
-  description = "Login server of the container registry created for this app."
-  value       = azurerm_container_registry.acr.login_server
+  description = "Login server of the container registry used by this app."
+  value       = local.acr_login_server
 }
 
 output "image" {
