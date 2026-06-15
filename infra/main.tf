@@ -41,14 +41,23 @@ resource "azurerm_resource_group" "rg" {
 # --- Container registry (create if missing, else use existing) ------------
 #
 # Terraform can't probe for existence at plan time, so `create_acr` selects the
-# mode: true -> create a new registry; false -> look up an existing one. Either
-# way the rest of the config reads through local.acr_* so nothing else changes.
+# mode: true (default) -> create a new registry in the app's resource group
+# with a globally-unique name (prefix + random suffix); false -> look up an
+# existing registry named acr_name in acr_resource_group_name. Either way the
+# rest of the config reads through local.acr_* so nothing else changes.
+
+resource "random_string" "acr_suffix" {
+  count   = var.create_acr ? 1 : 0
+  length  = 8
+  upper   = false
+  special = false
+}
 
 resource "azurerm_container_registry" "acr" {
   count               = var.create_acr ? 1 : 0
-  name                = var.acr_name
-  resource_group_name = var.acr_resource_group_name
-  location            = var.location
+  name                = "${var.prefix}${random_string.acr_suffix[0].result}"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
   sku                 = "Basic" # supports ACR Tasks (cloud build) + MI pull
   admin_enabled       = false
 }

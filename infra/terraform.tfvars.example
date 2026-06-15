@@ -6,10 +6,10 @@
 
 # --- Optional overrides ---------------------------------------------------
 # resource_group_name     = "gitmodel-rg"
-# location                = "eastus2"
-# prefix                  = "gitmodel"   # also used as the storage name prefix
-# create_acr              = false           # true: create acr_name; false: use existing
-# acr_name                = "azureaidemoacr"   # registry to build into / pull from
+# location                = "centralus"
+# prefix                  = "gitmodel"   # also used as the ACR & storage name prefix
+# create_acr              = true            # true: auto-create a new ACR; false: use existing
+# acr_name                = "azureaidemoacr"   # existing registry (only when create_acr = false)
 # acr_resource_group_name = "rg-azureaidemo"   # resource group of that registry
 # image_name              = "gitmodel"   # tag is auto-derived from a source hash
 # file_share_name     = "gitmodel-data"
