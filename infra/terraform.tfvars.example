@@ -1,18 +1,13 @@
 # Copy to terraform.tfvars and adjust. Run: terraform init && terraform apply
-
-# --- Required: connection string of an EXISTING storage account -----------
-# The account must allow shared-key access (allowSharedKeyAccess = true) and is
-# used for the /data Azure Files mount. account_name + access_key are parsed
-# from this string, so Terraform needs no RBAC on the account — it can live in
-# any subscription or tenant. Everything else (ACR, image build, resource
-# group...) is created by Terraform.
-# Get it with: az storage account show-connection-string -n <acct> -g <rg> --query connectionString -o tsv
-storage_connection_string = "DefaultEndpointsProtocol=https;AccountName=<acct>;AccountKey=<key>;EndpointSuffix=core.windows.net"
+#
+# Everything (resource group, ACR, image build, storage account + file share)
+# is created by Terraform. There are NO required variables — all have defaults.
+# The resource group is tagged SecurityControl=Ignore at creation time.
 
 # --- Optional overrides ---------------------------------------------------
 # resource_group_name     = "gitmodel-rg"
 # location                = "eastus2"
-# prefix                  = "gitmodel"
+# prefix                  = "gitmodel"   # also used as the storage name prefix
 # create_acr              = false           # true: create acr_name; false: use existing
 # acr_name                = "azureaidemoacr"   # registry to build into / pull from
 # acr_resource_group_name = "rg-azureaidemo"   # resource group of that registry

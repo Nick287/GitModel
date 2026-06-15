@@ -173,52 +173,42 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 - 镜像 tag 由源码（`hub/` + `Dockerfile` + `requirements.txt`）内容哈希自动生成：
   **改了代码再 `apply` 就会自动重建并滚动出新 revision**，不动代码则 apply 幂等、不重复构建
 - 用 user-assigned identity 从该 ACR 拉镜像（无需 admin 凭据）
-- Azure Files 挂载到 `/data` 持久化 SQLite
+- 自动新建一个 Standard LRS 存储账户 + file share（随机后缀命名），Azure Files 挂载到
+  `/data` 持久化 SQLite；挂载用 `nobrl` 选项关闭 SMB 字节范围锁（否则全新 share 上首次建库
+  会报 `database is locked`）
 - 单副本（SQLite 为 WAL 单写者，**切勿多副本**）
+- 资源组在创建时即打上 `SecurityControl = Ignore` 标签
 
 ### 前置条件
 
-绝大多数资源由 Terraform 自动创建，**唯一需要事先准备**的是一个用于 `/data`
-持久化的**存储账户**（Terraform 不负责创建它，只用它的 connection string）：
+**无需任何前置 Azure 资源** —— 资源组、ACR、镜像、存储账户、file share 全部由 Terraform
+自动创建。SQLite 数据库与表结构由应用启动时（`store.py` 的 `init_db()`）自动建立。
 
-- 该存储账户**必须已存在**，并**允许 shared key 访问**（`allowSharedKeyAccess = true`）——
-  Container Apps 挂载 Azure Files 依赖 key 认证
-
-> 只需提供存储账户的 connection string，其余**全自动**：file share（默认
-> `gitmodel-data`，可用 `file_share_name` 改）凭 connection string 里的 key 在
-> 挂载时自动创建；SQLite 数据库与表结构由应用启动时（`store.py` 的 `init_db()`）
-> 自动建立。换言之，给一个**空的存储账户**即可，无需预先建 share 或初始化数据库。
+只需具备：Azure CLI 已 `az login`，且对目标订阅有创建资源的权限（建资源组 + 角色分配，
+需 Owner 或 Contributor+User Access Administrator）。
 
 ### 部署
 
 ```bash
 cd infra
-cp terraform.tfvars.example terraform.tfvars   # 填入存储账户的 connection string
 terraform init
 terraform apply
 ```
 
-`terraform.tfvars` 里**只有一个值必须填**：`storage_connection_string`（存储账户的连接字符串）。
-其余（资源组名、区域、ACR 名、镜像名/tag…）都有可用默认值。获取连接字符串：
+`terraform.tfvars` 里**没有必填变量** —— 所有变量都有默认值（资源组名、区域、ACR/存储名、
+镜像名/tag…）。如需自定义，复制 `terraform.tfvars.example` 后覆盖即可。
 
-```bash
-az storage account show-connection-string -n <账户名> -g <所在RG> --query connectionString -o tsv
-```
-
-> **为什么用 connection string**：Terraform 从中解析出 `account_name` 和 `access_key`，
-> **不需要**对存储账户有任何 RBAC 权限，也**不关心它在哪个订阅 / 租户**——存储账户在
-> 别的订阅也能直接用。连接字符串是机密，对应变量已标记 `sensitive`；`terraform.tfvars`
-> 已被 `.gitignore` 排除，**切勿提交**。
+> **存储说明**：存储账户与 file share 都在应用所在资源组内由 Terraform 创建（不再依赖外部
+> 存储账户 / connection string）。`*.tfstate` 含敏感信息，已被 `.gitignore` 排除，**切勿提交**。
 
 ### 可配置变量
 
-所有变量定义在 `infra/variables.tf`（`default` 即默认值）。除连接字符串外都有可用默认值，
+所有变量定义在 `infra/variables.tf`（`default` 即默认值）。**全部变量都有默认值**，
 按需在 `terraform.tfvars` 覆盖，或用 `terraform apply -var="名=值"` 临时覆盖。
 **优先级**：`tfvars` / `-var` > `variables.tf` 的 `default`。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `storage_connection_string` | **（必填，无默认）** | 存储账户连接字符串，用于 `/data` 挂载 |
 | `resource_group_name` | `gitmodel-rg` | 新建的资源组名 |
 | `location` | `centralus` | Azure 区域 |
 | `prefix` | `gitmodel` | 资源名前缀（身份 / 环境 / App / ACR 名都基于它）|

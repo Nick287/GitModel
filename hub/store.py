@@ -365,6 +365,8 @@ def usage_summary(since: float | None, until: float | None) -> dict[str, Any]:
         where.append("ts <= ?")
         params.append(until)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
+    # Same predicate but table-qualified, for queries that JOIN api_keys.
+    uclause = clause.replace("ts ", "u.ts ") if clause else ""
 
     with _conn() as c:
         totals = c.execute(
@@ -395,10 +397,37 @@ def usage_summary(since: float | None, until: float | None) -> dict[str, Any]:
             params,
         ).fetchall()
 
+        # Per-API-key token totals, joined to api_keys for a friendly name.
+        by_api_key = c.execute(
+            f"SELECT u.api_key AS key, "
+            f"COALESCE(k.name, '') AS key_name, "
+            f"COUNT(*) AS requests, "
+            f"COALESCE(SUM(u.input_tokens),0) AS input_tokens, "
+            f"COALESCE(SUM(u.output_tokens),0) AS output_tokens, "
+            f"COALESCE(SUM(u.cached_tokens),0) AS cached_tokens, "
+            f"COALESCE(SUM(u.total_tokens),0) AS total_tokens "
+            f"FROM usage u LEFT JOIN api_keys k ON u.api_key = k.key {uclause} "
+            f"GROUP BY u.api_key ORDER BY total_tokens DESC",
+            params,
+        ).fetchall()
+
+        # (key, model) breakdown — used to compute per-key cost (cost is
+        # per-model, but a key spans models). Not returned directly.
+        by_key_model = c.execute(
+            f"SELECT u.api_key AS key, u.model AS model, "
+            f"COALESCE(SUM(u.input_tokens),0) AS input_tokens, "
+            f"COALESCE(SUM(u.output_tokens),0) AS output_tokens, "
+            f"COALESCE(SUM(u.cached_tokens),0) AS cached_tokens "
+            f"FROM usage u {uclause} GROUP BY u.api_key, u.model",
+            params,
+        ).fetchall()
+
     return {
         "totals": dict(totals),
         "by_model": [dict(r) for r in by_model],
         "by_day": [dict(r) for r in by_day],
+        "by_api_key": [dict(r) for r in by_api_key],
+        "_by_key_model": [dict(r) for r in by_key_model],
         "pricing": pricing_table(),
     }
 
@@ -409,7 +438,7 @@ def pricing_table() -> dict[str, dict[str, float]]:
 
 
 def usage_summary_with_cost(since: float | None, until: float | None) -> dict[str, Any]:
-    """usage_summary plus per-model and total USD cost estimates."""
+    """usage_summary plus per-model, per-key and total USD cost estimates."""
     data = usage_summary(since, until)
     pricing = data["pricing"]
     total_cost = 0.0
@@ -422,6 +451,18 @@ def usage_summary_with_cost(since: float | None, until: float | None) -> dict[st
         row["cost"] = round(cost, 4)
         total_cost += cost
     data["totals"]["cost"] = round(total_cost, 4)
+
+    # Per-key cost: cost is per-model, so sum each (key, model) slice.
+    cost_by_key: dict[Any, float] = {}
+    for row in data.pop("_by_key_model", []):
+        cost_by_key[row.get("key")] = cost_by_key.get(row.get("key"), 0.0) + estimate_cost(
+            pricing, row.get("model"),
+            row.get("input_tokens", 0), row.get("output_tokens", 0),
+            row.get("cached_tokens", 0),
+        )
+    for row in data["by_api_key"]:
+        row["cost"] = round(cost_by_key.get(row.get("key"), 0.0), 4)
+
     return data
 
 
