@@ -29,6 +29,7 @@ db-container/
 crash.log
 *.tfvars
 *.tfvars.json
+*.tfplan
 !**/*.tfvars.example
 
 # Local scratch
