@@ -917,8 +917,8 @@ async function refreshRecent() {
   if (!r.ok) return;
   const d = await r.json();
   $("recent-list").innerHTML = d.data.map(x => {
-    const t = new Date(x.ts * 1000);
-    const time = `${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")} ${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`;
+    const dt = new Date(x.ts * 1000);
+    const time = `${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")} ${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}`;
     const stTag = x.status === 200 ? `<span class="tag tag-ok">${x.status}</span>`
       : `<span class="tag tag-err">${x.status}</span>`;
     const inCell = x.estimated ? `${fmt(x.input_tokens)} <span class="tag tag-est">${t("tag.est")}</span>` : fmt(x.input_tokens);
