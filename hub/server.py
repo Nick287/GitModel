@@ -237,6 +237,34 @@ def _openai_models_payload(models: list[dict[str, Any]]) -> dict[str, Any]:
     return {"object": "list", "data": data}
 
 
+def _anthropic_models_payload(models: list[dict[str, Any]]) -> dict[str, Any]:
+    """Anthropic-shaped model list (GET /v1/models).
+
+    Anthropic clients such as Claude for Excel's "enterprise gateway" expect
+    this shape (objects with type/id/display_name) rather than the OpenAI one,
+    and reject the gateway otherwise.
+    """
+    data = []
+    for m in models:
+        mid = m.get("id")
+        if not mid:
+            continue
+        data.append(
+            {
+                "type": "model",
+                "id": mid,
+                "display_name": m.get("name") or mid,
+                "created_at": "2024-01-01T00:00:00Z",
+            }
+        )
+    return {
+        "data": data,
+        "has_more": False,
+        "first_id": data[0]["id"] if data else None,
+        "last_id": data[-1]["id"] if data else None,
+    }
+
+
 @app.get("/v1/models")
 async def v1_models(request: Request) -> JSONResponse:
     _check_client_auth(request)
@@ -244,6 +272,11 @@ async def v1_models(request: Request) -> JSONResponse:
         models = await cc.list_models()
     except cc.NotAuthenticatedError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    # Anthropic clients (e.g. Claude for Excel) send an anthropic-version
+    # header and expect the Anthropic /v1/models shape; OpenAI clients keep
+    # getting the OpenAI shape. Content-negotiate so both work on one path.
+    if request.headers.get("anthropic-version"):
+        return JSONResponse(_anthropic_models_payload(models))
     return JSONResponse(_openai_models_payload(models))
 
 
