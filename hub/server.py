@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import anthropic_adapter as aa
@@ -36,6 +37,20 @@ from . import store
 from .config import get_settings
 
 app = FastAPI(title="GitModel Hub", version="0.1.0")
+
+# Browser-hosted clients (e.g. Claude for Office / the Excel add-in) issue a
+# cross-origin CORS preflight before calling /v1/*. Without these headers the
+# webview blocks the request and surfaces "Failed to fetch". API-key auth on
+# /v1/* still applies, so allowing all origins only controls which browser
+# origins may READ a response, not who may call the API.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
+)
 _STATIC = Path(__file__).parent / "static"
 
 # In-memory admin sessions: token -> expiry epoch. Cleared on restart.
