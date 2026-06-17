@@ -36,6 +36,12 @@ variable "acr_resource_group_name" {
   default     = "rg-azureaidemo"
 }
 
+variable "acr_use_admin_creds" {
+  type        = bool
+  description = "How the Container App authenticates to ACR. false (default): user-assigned managed identity + an AcrPull role assignment (more secure, but creating the role assignment needs Owner / User Access Administrator). true: enable the registry admin user and pull with its username/password stored as a Container App secret — no role assignment, so a principal with only Contributor rights can deploy."
+  default     = false
+}
+
 # --- Container image (built in-cloud by `az acr build`) -------------------
 
 variable "image_name" {

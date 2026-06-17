@@ -59,7 +59,7 @@ resource "azurerm_container_registry" "acr" {
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
   sku                 = "Basic" # supports ACR Tasks (cloud build) + MI pull
-  admin_enabled       = false
+  admin_enabled       = var.acr_use_admin_creds
 }
 
 data "azurerm_container_registry" "acr" {
@@ -72,6 +72,12 @@ locals {
   acr_id           = var.create_acr ? azurerm_container_registry.acr[0].id : data.azurerm_container_registry.acr[0].id
   acr_name         = var.create_acr ? azurerm_container_registry.acr[0].name : data.azurerm_container_registry.acr[0].name
   acr_login_server = var.create_acr ? azurerm_container_registry.acr[0].login_server : data.azurerm_container_registry.acr[0].login_server
+
+  # Admin username/password, only resolved when acr_use_admin_creds = true
+  # (the registry has admin_enabled set to the same toggle, so these are
+  # populated then). Used by the Container App's registry block in that mode.
+  acr_admin_username = var.acr_use_admin_creds ? (var.create_acr ? azurerm_container_registry.acr[0].admin_username : data.azurerm_container_registry.acr[0].admin_username) : null
+  acr_admin_password = var.acr_use_admin_creds ? (var.create_acr ? azurerm_container_registry.acr[0].admin_password : data.azurerm_container_registry.acr[0].admin_password) : null
 }
 
 # Cloud build via ACR Tasks — uploads the build context and builds/pushes the
@@ -107,7 +113,11 @@ resource "azurerm_user_assigned_identity" "app" {
   location            = azurerm_resource_group.rg.location
 }
 
+# Only needed for managed-identity pull. Skipped when acr_use_admin_creds =
+# true (that path authenticates with the registry admin user instead, so no
+# Microsoft.Authorization/roleAssignments/write permission is required).
 resource "azurerm_role_assignment" "acr_pull" {
+  count                = var.acr_use_admin_creds ? 0 : 1
   scope                = local.acr_id
   role_definition_name = "AcrPull"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
@@ -183,7 +193,20 @@ resource "azurerm_container_app" "hub" {
 
   registry {
     server   = local.acr_login_server
-    identity = azurerm_user_assigned_identity.app.id
+    identity = var.acr_use_admin_creds ? null : azurerm_user_assigned_identity.app.id
+
+    # Admin-credential pull (acr_use_admin_creds = true). username is empty in
+    # MI mode, which tells Container Apps to use the identity above instead.
+    username             = var.acr_use_admin_creds ? local.acr_admin_username : null
+    password_secret_name = var.acr_use_admin_creds ? "acr-admin-password" : null
+  }
+
+  dynamic "secret" {
+    for_each = var.acr_use_admin_creds ? [1] : []
+    content {
+      name  = "acr-admin-password"
+      value = local.acr_admin_password
+    }
   }
 
   ingress {
