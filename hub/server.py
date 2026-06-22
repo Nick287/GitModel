@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import anthropic_adapter as aa
 from . import copilot_client as cc
+from . import image_client as ic
 from . import store
 from .config import get_settings
 
@@ -244,7 +245,17 @@ async def v1_models(request: Request) -> JSONResponse:
         models = await cc.list_models()
     except cc.NotAuthenticatedError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    return JSONResponse(_openai_models_payload(models))
+    payload = _openai_models_payload(models)
+    if ic.is_configured():
+        payload["data"].append(
+            {
+                "id": ic.get_model(),
+                "object": "model",
+                "created": 0,
+                "owned_by": "azure-openai",
+            }
+        )
+    return JSONResponse(payload)
 
 
 async def _passthrough(
@@ -318,6 +329,67 @@ async def v1_chat_completions(request: Request) -> Any:
 @app.post("/v1/responses")
 async def v1_responses(request: Request) -> Any:
     return await _passthrough(request, "/responses", responses_shape=True)
+
+
+# =========================================================================== #
+# Image generation endpoints (Azure OpenAI gpt-image backend)
+# =========================================================================== #
+def _record_image(client_key, model, endpoint, data, status) -> None:
+    """Record a usage row for an image request, reusing the Responses-shaped
+    usage parser (Azure image ``usage`` matches that shape)."""
+    if status == 200 and isinstance(data, dict):
+        i, o, t, cached = _norm_usage(data.get("usage"), responses_shape=True)
+        served = data.get("model")
+    else:
+        i, o, t, cached, served = 0, 0, 0, 0, None
+    _record(client_key=client_key, model=model, served=served,
+            endpoint=endpoint, usage3=(i, o, t), streamed=False,
+            estimated=False, status=status, cached=cached)
+
+
+@app.post("/v1/images/generations")
+async def v1_images_generations(request: Request) -> Any:
+    client_key = _check_client_auth(request)
+    body = await request.json()
+    if not ic.is_configured():
+        raise HTTPException(
+            status_code=503, detail="Image backend not configured"
+        )
+    model = body.get("model") or ic.get_model()
+    status, data = await ic.generate(body)
+    _record_image(client_key, model, "images.generations", data, status)
+    return JSONResponse(data, status_code=status)
+
+
+@app.post("/v1/images/edits")
+async def v1_images_edits(request: Request) -> Any:
+    client_key = _check_client_auth(request)
+    if not ic.is_configured():
+        raise HTTPException(
+            status_code=503, detail="Image backend not configured"
+        )
+    form = await request.form()
+    data: dict[str, Any] = {}
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    for field, value in form.multi_items():
+        if hasattr(value, "read"):  # an UploadFile
+            content = await value.read()
+            files.append(
+                (
+                    field,
+                    (
+                        value.filename or field,
+                        content,
+                        value.content_type or "application/octet-stream",
+                    ),
+                )
+            )
+        else:
+            data[field] = value
+    model = data.get("model") or ic.get_model()
+    status, resp = await ic.edit(data, files)
+    _record_image(client_key, model, "images.edits", resp, status)
+    return JSONResponse(resp, status_code=status)
 
 
 # =========================================================================== #
@@ -449,9 +521,15 @@ async def api_change_password(
 async def api_get_settings(x_admin_token: str | None = Header(default=None)) -> Any:
     _check_admin(x_admin_token)
     s = get_settings()
+    img = store.get_image_config()
     return {
         "require_auth": store.get_require_auth(s.require_auth),
         "pricing": store.get_pricing(),
+        "image": {
+            "endpoint": img.get("endpoint", ""),
+            "model": img.get("model", "") or ic.DEFAULT_IMAGE_MODEL,
+            "configured": bool(img.get("endpoint") and img.get("api_key")),
+        },
     }
 
 
@@ -465,10 +543,21 @@ async def api_set_settings(
         store.set_require_auth(bool(body["require_auth"]))
     if "pricing" in body and isinstance(body["pricing"], dict):
         store.set_pricing(body["pricing"])
+    if "image" in body and isinstance(body["image"], dict):
+        img = body["image"]
+        store.set_image_config(
+            img.get("endpoint"), img.get("api_key"), img.get("model")
+        )
     s = get_settings()
+    img = store.get_image_config()
     return {
         "require_auth": store.get_require_auth(s.require_auth),
         "pricing": store.get_pricing(),
+        "image": {
+            "endpoint": img.get("endpoint", ""),
+            "model": img.get("model", "") or ic.DEFAULT_IMAGE_MODEL,
+            "configured": bool(img.get("endpoint") and img.get("api_key")),
+        },
     }
 
 
@@ -520,6 +609,10 @@ async def api_models(x_admin_token: str | None = Header(default=None)) -> Any:
         }
         for m in models
     ]
+    if ic.is_configured():
+        chat_models.append(
+            {"id": ic.get_model(), "vendor": "azure-openai", "type": "image"}
+        )
     return {"data": chat_models}
 
 

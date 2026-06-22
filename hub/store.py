@@ -171,6 +171,49 @@ def set_require_auth(enabled: bool) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Azure image backend config (endpoint / api key / default model) — JSON blob
+# --------------------------------------------------------------------------- #
+def get_image_config() -> dict[str, str]:
+    """Return the saved Azure image backend config (any field may be empty)."""
+    import json
+
+    raw = get_setting("image_config")
+    if raw:
+        try:
+            cfg = json.loads(raw)
+            if isinstance(cfg, dict):
+                return {
+                    "endpoint": str(cfg.get("endpoint") or ""),
+                    "api_key": str(cfg.get("api_key") or ""),
+                    "model": str(cfg.get("model") or ""),
+                }
+        except (ValueError, TypeError):
+            pass
+    return {"endpoint": "", "api_key": "", "model": ""}
+
+
+def set_image_config(
+    endpoint: str | None, api_key: str | None, model: str | None
+) -> dict[str, str]:
+    """Persist the Azure image backend config.
+
+    A blank/None ``api_key`` preserves the previously stored key, so the portal
+    never has to re-echo the secret back to the browser to keep it.
+    """
+    import json
+
+    current = get_image_config()
+    new_key = (api_key or "").strip()
+    cfg = {
+        "endpoint": (endpoint or "").strip(),
+        "api_key": new_key or current.get("api_key", ""),
+        "model": (model or "").strip(),
+    }
+    set_setting("image_config", json.dumps(cfg))
+    return cfg
+
+
+# --------------------------------------------------------------------------- #
 # Pricing (USD per 1M tokens, split input / output) — used for cost estimates
 # --------------------------------------------------------------------------- #
 # Public list prices (USD per 1M tokens) as of the Anthropic pricing page;
@@ -204,6 +247,8 @@ DEFAULT_PRICING: dict[str, dict[str, float]] = {
     "gemini-3-flash-preview": {"input": 0.50, "output": 3.0},
     "gemini-3.1-pro-preview": {"input": 2.0, "output": 12.0},
     "gemini-3.5-flash": {"input": 1.5, "output": 9.0},
+    # Azure OpenAI image model (token-based; image output tokens dominate)
+    "gpt-image-2": {"input": 5.0, "output": 40.0},
 }
 
 

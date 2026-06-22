@@ -143,6 +143,35 @@ export OPENAI_API_KEY="<门户生成的 key>"
 > **图片输入（多模态）** 已支持：网关在检测到图片内容时自动附加
 > `Copilot-Vision-Request: true` 头。
 
+### 图片生成（Azure GPT Image）
+
+网关可挂一个 **Azure OpenAI `gpt-image`** 部署作为图片后端，对外暴露 OpenAI 兼容的
+`POST /v1/images/generations`（文生图）与 `POST /v1/images/edits`（图生图 / 局部重绘）。
+
+先在门户 **「设置 → 图片生成」** 填入 Azure 的 **Endpoint** 与 **API Key**（保存在本地
+`db/` 的 SQLite，不写入代码 / 环境变量；endpoint 填完整的
+`.../openai/v1/images/generations` 或裸的 `.../openai/v1` 均可），然后：
+
+```bash
+curl http://127.0.0.1:8088/v1/images/generations \
+  -H "Authorization: Bearer <门户生成的 key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"a tiny red cube on white","size":"1024x1024"}'
+```
+
+- **模型**：`gpt-image-2`
+- **常用参数**：`prompt`（必填）、`n`、`size`（宽高均需被 16 整除，如 `1024x1024` /
+  `1536x1024` / `1024x1536` / `auto`）、`quality`（`low` / `medium` / `high` / `auto`）、
+  `output_format`（`png` / `jpeg`）、`background`（`transparent` / `opaque` / `auto`）、
+  `output_compression`（jpeg，0–100）
+- **返回**：始终是 base64（`data[].b64_json`，无 `url` 模式）；自带 `usage`
+  （`input_tokens` / `output_tokens` / `total_tokens`），用量与费用照常计入门户统计
+- **图生图 / 局部重绘**：`/v1/images/edits` 用 `multipart/form-data` 上传
+  `image`（及可选 `mask`）+ `prompt` 等字段
+
+> **限速**：Azure S0 套餐对 `gpt-image` 限速很严（约每 50 秒 1 次），超限会原样返回
+> `429`，请自行控制调用频率。
+
 ### curl 自测
 
 ```bash

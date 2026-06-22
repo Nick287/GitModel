@@ -296,6 +296,9 @@
       <div class="code-head"><span class="muted" data-i18n="ex.geminiLabel">Google Gemini（OpenAI 兼容）</span>
         <button class="ghost btn-copy" data-copy="ex-gemini" data-i18n="btn.copy">复制</button></div>
       <pre><code id="ex-gemini"></code></pre>
+      <div class="code-head"><span class="muted" data-i18n="ex.imageLabel">图片生成（Azure GPT Image）</span>
+        <button class="ghost btn-copy" data-copy="ex-image" data-i18n="btn.copy">复制</button></div>
+      <pre><code id="ex-image"></code></pre>
     </div>
   </section>
 
@@ -386,6 +389,34 @@
         开启后，下游客户端调用 <code>/v1/*</code> 必须带有效 API key（建议对外暴露时开启）。
         关闭时本机任何请求都可直接调用。
       </p>
+    </div>
+    <div class="card">
+      <h2 data-i18n="settings.imageTitle">图片生成（Azure GPT Image）</h2>
+      <p class="muted" style="margin:0 0 12px" data-i18n-html="settings.imageNote">
+        配置一个 Azure OpenAI <code>gpt-image</code> 部署，网关即对外暴露
+        <code>/v1/images/generations</code> 与 <code>/v1/images/edits</code>。
+      </p>
+      <div class="row" style="margin-bottom:10px">
+        <label class="muted" style="width:88px" data-i18n="settings.imageEndpoint">Endpoint</label>
+        <input id="img-endpoint" style="flex:1;min-width:280px"
+          placeholder="https://<resource>.services.ai.azure.com/openai/v1/images/generations"
+          data-i18n-ph="settings.imageEndpointPh" />
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <label class="muted" style="width:88px" data-i18n="settings.imageKey">API Key</label>
+        <input id="img-key" type="password" style="flex:1;min-width:280px"
+          placeholder="Azure API key" data-i18n-ph="settings.imageKeyPh" />
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <label class="muted" style="width:88px" data-i18n="settings.imageModel">模型</label>
+        <input id="img-model" style="width:200px" placeholder="gpt-image-2" />
+        <span id="img-state" class="badge off" data-i18n="settings.imageNotSet">未配置</span>
+      </div>
+      <div class="row">
+        <button id="btn-save-image" data-i18n="settings.save">保存</button>
+      </div>
+      <p class="muted" style="margin:8px 0 0" data-i18n="settings.imageKeyHint">API Key 留空则保留已保存的值；只需在更换 key 时填写。</p>
+      <p class="err" id="image-msg"></p>
     </div>
     <div class="card">
       <h2 data-i18n="settings.pricingTitle">模型单价（美元 / 百万 token）</h2>
@@ -561,6 +592,18 @@ const I18N = {
     "ex.keyPlaceholder": "<API Keys 标签页生成的 key>",
     "ex.modelLabel": "模型",
     "ex.geminiNote": "Gemini 走 OpenAI 兼容端点最稳；它是推理模型，max_tokens 请给大些",
+    "ex.imageLabel": "图片生成（Azure GPT Image）",
+    "ex.imageNote": "文生图，返回 base64（data[].b64_json）；需先在「设置」配置 Azure 端点与 key",
+    "settings.imageTitle": "图片生成（Azure GPT Image）",
+    "settings.imageNote": '配置一个 Azure OpenAI <code>gpt-image</code> 部署，网关即对外暴露 <code>/v1/images/generations</code> 与 <code>/v1/images/edits</code>。',
+    "settings.imageEndpoint": "Endpoint",
+    "settings.imageEndpointPh": "https://<resource>.services.ai.azure.com/openai/v1/images/generations",
+    "settings.imageKey": "API Key",
+    "settings.imageKeyPh": "Azure API key",
+    "settings.imageModel": "模型",
+    "settings.imageNotSet": "未配置",
+    "settings.imageSet": "已配置",
+    "settings.imageKeyHint": "API Key 留空则保留已保存的值；只需在更换 key 时填写。",
   },
   en: {
     "login.title": "Admin sign-in",
@@ -695,6 +738,18 @@ const I18N = {
     "ex.keyPlaceholder": "<key from the API Keys tab>",
     "ex.modelLabel": "Models",
     "ex.geminiNote": "Gemini works best via the OpenAI-compatible endpoint; it's a reasoning model, so give max_tokens a large value",
+    "ex.imageLabel": "Image generation (Azure GPT Image)",
+    "ex.imageNote": "Text-to-image, returns base64 (data[].b64_json); configure the Azure endpoint + key in Settings first",
+    "settings.imageTitle": "Image generation (Azure GPT Image)",
+    "settings.imageNote": 'Configure an Azure OpenAI <code>gpt-image</code> deployment and the gateway exposes <code>/v1/images/generations</code> and <code>/v1/images/edits</code>.',
+    "settings.imageEndpoint": "Endpoint",
+    "settings.imageEndpointPh": "https://<resource>.services.ai.azure.com/openai/v1/images/generations",
+    "settings.imageKey": "API Key",
+    "settings.imageKeyPh": "Azure API key",
+    "settings.imageModel": "Model",
+    "settings.imageNotSet": "Not configured",
+    "settings.imageSet": "Configured",
+    "settings.imageKeyHint": "Leave API Key blank to keep the saved value; fill it in only when rotating the key.",
   },
 };
 let LANG = localStorage.getItem("hub_lang") || "zh";
@@ -721,6 +776,7 @@ function rerenderDynamic() {
   if (!appInited) return;
   refreshStatus();
   setAuthText(_lastAuth);
+  if (_lastImage) renderImageSettings(_lastImage);
   renderPricing();
   const tab = document.querySelector("nav.tabs button.active");
   const name = tab && tab.dataset.tab;
@@ -988,6 +1044,7 @@ $("btn-create-key").onclick = async () => {
 
 // ---------- Settings ----------
 let PRICING = {};
+let _lastImage = null;
 async function loadSettings() {
   const r = await api("/api/settings"); if (!r.ok) return;
   const d = await r.json();
@@ -995,7 +1052,32 @@ async function loadSettings() {
   setAuthText(d.require_auth);
   PRICING = d.pricing || {};
   renderPricing();
+  if (d.image) renderImageSettings(d.image);
 }
+function renderImageSettings(img) {
+  _lastImage = img;
+  $("img-endpoint").value = img.endpoint || "";
+  $("img-model").value = img.model || "";
+  $("img-key").value = "";
+  $("img-key").placeholder = img.configured ? t("settings.imageSet") : t("settings.imageKeyPh");
+  const st = $("img-state");
+  st.textContent = img.configured ? t("settings.imageSet") : t("settings.imageNotSet");
+  st.className = "badge " + (img.configured ? "on" : "off");
+}
+$("btn-save-image").onclick = async () => {
+  $("image-msg").textContent = "";
+  const payload = { image: {
+    endpoint: $("img-endpoint").value.trim(),
+    api_key: $("img-key").value,
+    model: $("img-model").value.trim(),
+  } };
+  const r = await api("/api/settings", { method:"POST", body: JSON.stringify(payload) });
+  if (r.ok) {
+    const d = await r.json();
+    if (d.image) renderImageSettings(d.image);
+    $("image-msg").style.color = "var(--green)"; $("image-msg").textContent = t("common.saved");
+  } else { $("image-msg").style.color = "var(--red)"; $("image-msg").textContent = t("common.saveFail"); }
+};
 let _lastAuth = false;
 function setAuthText(on) { _lastAuth = !!on; $("auth-text").textContent = on ? t("settings.authOn") : t("settings.authOff"); }
 $("toggle-auth").onchange = async () => {
@@ -1065,6 +1147,13 @@ curl ${base}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -d '{"model":"gemini-2.5-pro","max_tokens":2048,"messages":[{"role":"user","content":"say ok"}]}'
 # ${M}: gemini-2.5-pro / gemini-3-flash-preview / gemini-3.1-pro-preview / gemini-3.5-flash`;
+  $("ex-image").textContent =
+`# ${t("ex.imageNote")}
+curl ${base}/v1/images/generations \\
+  -H "Authorization: Bearer ${K}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"gpt-image-2","prompt":"a tiny red cube on white","size":"1024x1024"}'
+# ${M}: gpt-image-2`;
 }
 
 // ---------- Copy buttons ----------
