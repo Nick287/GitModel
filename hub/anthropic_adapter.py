@@ -146,6 +146,56 @@ def _content_to_openai(content: Any) -> Any:
     return parts
 
 
+def _split_tool_result(
+    tr: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Split one Anthropic ``tool_result`` into (tool_message, image_parts).
+
+    The OpenAI ``tool`` role only accepts text, so image blocks returned by a
+    tool (e.g. Claude Code's ``Read`` on an image) cannot ride the tool message
+    — they must be forwarded on a following ``user`` message. This returns the
+    text-only ``tool`` message (keyed by ``tool_use_id``) plus any images as
+    OpenAI ``image_url`` parts for the caller to attach downstream. Dropping
+    them here is exactly the bug this guards against.
+    """
+    tr_content = tr.get("content")
+    text = ""
+    image_parts: list[dict[str, Any]] = []
+
+    if isinstance(tr_content, list):
+        text_chunks: list[str] = []
+        for c in tr_content:
+            ctype = c.get("type")
+            if ctype == "text":
+                text_chunks.append(c.get("text", ""))
+            elif ctype == "image":
+                src = c.get("source", {})
+                if src.get("type") == "base64":
+                    url = f"data:{src.get('media_type')};base64,{src.get('data')}"
+                else:
+                    url = src.get("url", "")
+                if url:
+                    image_parts.append(
+                        {"type": "image_url", "image_url": {"url": url}}
+                    )
+        text = "".join(text_chunks)
+    elif isinstance(tr_content, str):
+        text = tr_content
+    else:
+        text = json.dumps(tr_content)
+
+    # A tool message must not be empty when the result was image-only.
+    if not text and image_parts:
+        text = "[image returned by tool; see the following message]"
+
+    tool_msg = {
+        "role": "tool",
+        "tool_call_id": tr.get("tool_use_id"),
+        "content": text,
+    }
+    return tool_msg, image_parts
+
+
 def anthropic_to_openai(req: dict[str, Any]) -> dict[str, Any]:
     """Translate an Anthropic /v1/messages request to OpenAI chat payload."""
     messages: list[dict[str, Any]] = []
@@ -172,21 +222,16 @@ def anthropic_to_openai(req: dict[str, Any]) -> dict[str, Any]:
             ]
 
             # tool_result blocks become standalone OpenAI 'tool' messages.
+            # Any images they carry can't ride a 'tool' message (OpenAI only
+            # allows text there), so collect them and forward on a 'user'
+            # message right after — otherwise they'd be silently dropped.
+            tool_result_images: list[dict[str, Any]] = []
             for tr in tool_results:
-                tr_content = tr.get("content")
-                if isinstance(tr_content, list):
-                    tr_content = "".join(
-                        c.get("text", "")
-                        for c in tr_content
-                        if c.get("type") == "text"
-                    )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tr.get("tool_use_id"),
-                        "content": tr_content if isinstance(tr_content, str) else json.dumps(tr_content),
-                    }
-                )
+                tool_msg, image_parts = _split_tool_result(tr)
+                messages.append(tool_msg)
+                tool_result_images.extend(image_parts)
+            if tool_result_images:
+                messages.append({"role": "user", "content": tool_result_images})
 
             if role == "assistant" and tool_uses:
                 tool_calls = [
