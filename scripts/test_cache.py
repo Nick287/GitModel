@@ -41,7 +41,7 @@ DEFAULT_BASE_URL = "https://gitmodel-hub.agreeablegrass-75e2199b.centralus.azure
 # Models to test by default. gpt-5.5 is responses-only (served via /responses);
 # the others use /chat/completions. gemini-2.5-pro caches reliably once the
 # prefix clears its ~2048-token threshold (gemini-3.1-pro-preview does not yet).
-DEFAULT_MODELS = ["gpt-5.5", "claude-opus-4.8", "gemini-2.5-pro"]
+DEFAULT_MODELS = ["gpt-5.4-mini", "claude-opus-4.8", "gemini-2.5-pro"]
 
 GREEN, RED, YELLOW, DIM, BOLD, RESET = (
     "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[1m", "\033[0m",

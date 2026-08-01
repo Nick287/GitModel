@@ -265,7 +265,8 @@
     <div class="stat" style="margin-bottom:20px">
       <div class="stat-box"><span class="muted" data-i18n="dash.todayReq">今日请求</span><span class="n" id="d-req">0</span></div>
       <div class="stat-box"><span class="muted" data-i18n="dash.todayTok">今日 tokens</span><span class="n" id="d-tok">0</span></div>
-      <div class="stat-box accent"><span class="muted" data-i18n="dash.todayCost">今日费用</span><span class="n" id="d-cost">$0.00</span></div>
+      <div class="stat-box accent"><span class="muted" data-i18n="dash.todayCost">今日等价成本</span><span class="n" id="d-cost">$0.00</span></div>
+      <div class="stat-box"><span class="muted" data-i18n="dash.todayQuota">今日配额请求</span><span class="n" id="d-quota">0</span></div>
       <div class="stat-box"><span class="muted" data-i18n="dash.validKeys">有效 Key</span><span class="n" id="d-keys">0</span></div>
     </div>
     <div class="card">
@@ -324,7 +325,8 @@
         <div class="stat-box"><span class="muted" data-i18n="usage.cacheHit">缓存命中</span><span class="n" id="t-cache">0</span></div>
         <div class="stat-box"><span class="muted" data-i18n="usage.outTok">输出 tokens</span><span class="n" id="t-out">0</span></div>
         <div class="stat-box"><span class="muted" data-i18n="usage.totalTok">总 tokens</span><span class="n" id="t-tot">0</span></div>
-        <div class="stat-box accent"><span class="muted" data-i18n="usage.estCost">预估费用</span><span class="n" id="t-cost">$0.00</span></div>
+        <div class="stat-box accent"><span class="muted" data-i18n="usage.estCost">等价成本</span><span class="n" id="t-cost">$0.00</span></div>
+        <div class="stat-box"><span class="muted" data-i18n="usage.quotaReq">配额请求</span><span class="n" id="t-quota">0</span></div>
       </div>
       <h3 class="muted" style="margin:22px 0 10px" data-i18n="usage.byDay">按天趋势</h3>
       <div id="by-day-chart" class="chart"></div>
@@ -332,9 +334,9 @@
         <button class="ghost btn-dim active" data-dim="model" data-i18n="usage.byModel">按模型</button>
         <button class="ghost btn-dim" data-dim="key" data-i18n="usage.byKey">按 API Key</button>
       </div>
-      <table id="tbl-by-model"><thead><tr><th data-i18n="th.model">模型</th><th data-i18n="th.req">请求</th><th data-i18n="th.in">输入</th><th data-i18n="th.cacheHit">缓存命中</th><th data-i18n="th.out">输出</th><th data-i18n="th.total">总计</th><th data-i18n="th.estCost">预估费用</th></tr></thead>
+      <table id="tbl-by-model"><thead><tr><th data-i18n="th.model">模型</th><th data-i18n="th.req">请求</th><th data-i18n="th.in">输入</th><th data-i18n="th.cacheHit">缓存命中</th><th data-i18n="th.out">输出</th><th data-i18n="th.total">总计</th><th data-i18n="th.estCost">等价成本</th><th data-i18n="th.quotaReq">配额请求</th></tr></thead>
         <tbody id="by-model"></tbody></table>
-      <table id="tbl-by-key" style="display:none"><thead><tr><th data-i18n="th.apiKey">API Key</th><th data-i18n="th.req">请求</th><th data-i18n="th.in">输入</th><th data-i18n="th.cacheHit">缓存命中</th><th data-i18n="th.out">输出</th><th data-i18n="th.total">总计</th><th data-i18n="th.estCost">预估费用</th></tr></thead>
+      <table id="tbl-by-key" style="display:none"><thead><tr><th data-i18n="th.apiKey">API Key</th><th data-i18n="th.req">请求</th><th data-i18n="th.in">输入</th><th data-i18n="th.cacheHit">缓存命中</th><th data-i18n="th.out">输出</th><th data-i18n="th.total">总计</th><th data-i18n="th.estCost">等价成本</th><th data-i18n="th.quotaReq">配额请求</th></tr></thead>
         <tbody id="by-key"></tbody></table>
       <p class="muted" style="margin-top:10px" data-i18n-html="usage.note">费用按「设置」页的单价表估算（美元 / 百万 token），缓存命中部分按 <code>cache_read</code> 单价（默认为输入价的 0.1×）折算，仅供参考。</p>
     </div>
@@ -421,7 +423,7 @@
     <div class="card">
       <h2 data-i18n="settings.pricingTitle">模型单价（美元 / 百万 token）</h2>
       <p class="muted" style="margin:0 0 12px" data-i18n-html="settings.pricingNote">
-        用于用量页的费用估算。<code>default</code> 为未列出模型的兜底单价。
+        用于用量页的费用估算。未列出的模型不计入等价成本。
       </p>
       <div class="table-scroll" style="max-height:300px">
         <table><thead><tr><th data-i18n="th.model">模型</th><th data-i18n="th.inRate">输入单价</th><th data-i18n="th.cacheRate">缓存读单价</th><th data-i18n="th.outRate">输出单价</th><th></th></tr></thead>
@@ -475,7 +477,8 @@ const I18N = {
     "nav.settings": "设置",
     "dash.todayReq": "今日请求",
     "dash.todayTok": "今日 tokens",
-    "dash.todayCost": "今日费用",
+    "dash.todayCost": "今日等价成本",
+    "dash.todayQuota": "今日配额请求",
     "dash.validKeys": "有效 Key",
     "dash.copilotTitle": "GitHub Copilot 登录",
     "dash.copilotDesc": "Hub 用你的 Copilot 订阅为下游客户端（Codex / Claude Code / OpenAI SDK）提供模型。",
@@ -503,11 +506,12 @@ const I18N = {
     "usage.cacheHit": "缓存命中",
     "usage.outTok": "输出 tokens",
     "usage.totalTok": "总 tokens",
-    "usage.estCost": "预估费用",
+    "usage.estCost": "等价成本",
+    "usage.quotaReq": "配额请求",
     "usage.byDay": "按天趋势",
     "usage.byModel": "按模型",
     "usage.byKey": "按 API Key",
-    "usage.note": '费用按「设置」页的单价表估算（美元 / 百万 token），缓存命中部分按 <code>cache_read</code> 单价（默认为输入价的 0.1×）折算，仅供参考。',
+    "usage.note": '<b>等价成本</b>取自上游 Copilot 返回的权威计费数据（nano AIU），换算为按 Anthropic / OpenAI / Google 公开牌价计算的美元金额 —— 它<b>不是</b>你付给 GitHub 的账单，Copilot 是订阅制。<b>配额请求</b>是按 Copilot premium request 配额计费、不按 token 计价的请求数。两者性质不同，故并列显示、不相加。',
     "usage.recentTitle": "最近请求",
     "usage.recentNote": '<span class="tag tag-est">估算</span> 表示后端未返回精确用量，输入 token 为本地估算值。',
     "th.model": "模型",
@@ -516,7 +520,8 @@ const I18N = {
     "th.cacheHit": "缓存命中",
     "th.out": "输出",
     "th.total": "总计",
-    "th.estCost": "预估费用",
+    "th.estCost": "等价成本",
+    "th.quotaReq": "配额请求",
     "th.apiKey": "API Key",
     "th.time": "时间",
     "th.endpoint": "端点",
@@ -540,7 +545,7 @@ const I18N = {
     "settings.authTitle": "客户端鉴权",
     "settings.authNote": '开启后，下游客户端调用 <code>/v1/*</code> 必须带有效 API key（建议对外暴露时开启）。关闭时本机任何请求都可直接调用。',
     "settings.pricingTitle": "模型单价（美元 / 百万 token）",
-    "settings.pricingNote": '用于用量页的费用估算。<code>default</code> 为未列出模型的兜底单价。',
+    "settings.pricingNote": '<b>仅用于上游未提供单价的模型</b>（这些模型按 Copilot 配额计费、单价全为 0）。其余模型直接采用上游返回的权威计费数据，改这里不会影响它们。未列出的模型不计入等价成本 —— 它们本就没有按 token 的价格，已经计入「配额请求」。',
     "settings.priceModelPh": "模型名，如 claude-opus-4.7",
     "settings.priceInPh": "输入",
     "settings.priceCachePh": "缓存读",
@@ -621,7 +626,8 @@ const I18N = {
     "nav.settings": "Settings",
     "dash.todayReq": "Requests today",
     "dash.todayTok": "Tokens today",
-    "dash.todayCost": "Cost today",
+    "dash.todayCost": "Equiv. cost today",
+    "dash.todayQuota": "Quota requests today",
     "dash.validKeys": "Active keys",
     "dash.copilotTitle": "GitHub Copilot sign-in",
     "dash.copilotDesc": "The hub serves models to downstream clients (Codex / Claude Code / OpenAI SDK) using your Copilot subscription.",
@@ -649,11 +655,12 @@ const I18N = {
     "usage.cacheHit": "Cache hits",
     "usage.outTok": "Output tokens",
     "usage.totalTok": "Total tokens",
-    "usage.estCost": "Est. cost",
+    "usage.estCost": "Equivalent cost",
+    "usage.quotaReq": "Quota requests",
     "usage.byDay": "Daily trend",
     "usage.byModel": "By model",
     "usage.byKey": "By API key",
-    "usage.note": 'Cost is estimated from the price table in Settings (USD / 1M tokens); cache hits are billed at the <code>cache_read</code> rate (default 0.1× input). For reference only.',
+    "usage.note": '<b>Equivalent cost</b> comes from the authoritative billing figure Copilot returns upstream (nano AIU), converted to USD at Anthropic / OpenAI / Google list prices. It is <b>not</b> your GitHub bill — Copilot is a flat-rate subscription. <b>Quota requests</b> are requests billed against the Copilot premium-request allowance rather than per token. The two are different kinds of number, so they are shown side by side and never summed.',
     "usage.recentTitle": "Recent requests",
     "usage.recentNote": '<span class="tag tag-est">est.</span> means the backend returned no exact usage; input tokens are a local estimate.',
     "th.model": "Model",
@@ -662,7 +669,8 @@ const I18N = {
     "th.cacheHit": "Cache hits",
     "th.out": "Output",
     "th.total": "Total",
-    "th.estCost": "Est. cost",
+    "th.estCost": "Equiv. cost",
+    "th.quotaReq": "Quota reqs",
     "th.apiKey": "API Key",
     "th.time": "Time",
     "th.endpoint": "Endpoint",
@@ -686,7 +694,7 @@ const I18N = {
     "settings.authTitle": "Client authentication",
     "settings.authNote": 'When on, downstream clients calling <code>/v1/*</code> must carry a valid API key (recommended when exposed publicly). When off, any local request is allowed.',
     "settings.pricingTitle": "Model pricing (USD / 1M tokens)",
-    "settings.pricingNote": 'Used for cost estimates on the usage page. <code>default</code> is the fallback rate for unlisted models.',
+    "settings.pricingNote": '<b>Only applies to models the upstream prices at zero</b> — those bill against the Copilot quota, so there is no rate to convert. Every other model uses the authoritative upstream figure, and editing it here will not affect them. A model that is not listed contributes nothing to equivalent cost — it has no per-token price to begin with, and is already counted under "quota requests".',
     "settings.priceModelPh": "Model name, e.g. claude-opus-4.7",
     "settings.priceInPh": "Input",
     "settings.priceCachePh": "Cache read",
@@ -875,7 +883,8 @@ async function refreshDashboard() {
     const d = await r.json();
     $("d-req").textContent = fmt(d.totals.requests);
     $("d-tok").textContent = fmt(d.totals.total_tokens);
-    $("d-cost").textContent = money(d.totals.cost);
+    $("d-cost").textContent = money(d.totals.equivalent_cost ?? d.totals.cost);
+    $("d-quota").textContent = fmt(d.totals.quota_requests || 0);
   }
   const rk = await api("/api/keys");
   if (rk.ok) {
@@ -955,16 +964,25 @@ async function refreshUsage() {
   $("t-cache").textContent = fmt(d.totals.cached_tokens);
   $("t-out").textContent = fmt(d.totals.output_tokens);
   $("t-tot").textContent = fmt(d.totals.total_tokens);
-  $("t-cost").textContent = money(d.totals.cost);
+  $("t-cost").textContent = money(d.totals.equivalent_cost ?? d.totals.cost);
+  $("t-quota").textContent = fmt(d.totals.quota_requests || 0);
   renderByDay(d.by_day);
+  // A model bills one way or the other, never both: a per-token rate shows a
+  // cost and a dash for quota, a quota-billed model the reverse.
+  const cell = (row) => {
+    const q = row.quota_requests || 0;
+    const c = row.equivalent_cost ?? row.cost ?? 0;
+    return `<td>${c ? money(c) : '<span class="muted">—</span>'}</td>` +
+           `<td>${q ? fmt(q) : '<span class="muted">—</span>'}</td>`;
+  };
   $("by-model").innerHTML = d.by_model.map(m =>
-    `<tr><td>${m.model?esc(m.model):t("common.unknown")}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.cached_tokens)}</td><td>${fmt(m.output_tokens)}</td><td>${fmt(m.total_tokens)}</td><td>${money(m.cost)}</td></tr>`
-  ).join("") || `<tr><td colspan="7" class="muted">${t("common.noData")}</td></tr>`;
+    `<tr><td>${m.model?esc(m.model):t("common.unknown")}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.cached_tokens)}</td><td>${fmt(m.output_tokens)}</td><td>${fmt(m.total_tokens)}</td>${cell(m)}</tr>`
+  ).join("") || `<tr><td colspan="8" class="muted">${t("common.noData")}</td></tr>`;
   $("by-key").innerHTML = (d.by_api_key || []).map(k => {
     const label = k.key_name ? esc(k.key_name)
       : (k.key ? `<span class="muted">…${esc(String(k.key).slice(-6))}</span>` : `<span class="muted">${t("common.anon")}</span>`);
-    return `<tr><td>${label}</td><td>${fmt(k.requests)}</td><td>${fmt(k.input_tokens)}</td><td>${fmt(k.cached_tokens)}</td><td>${fmt(k.output_tokens)}</td><td>${fmt(k.total_tokens)}</td><td>${money(k.cost)}</td></tr>`;
-  }).join("") || `<tr><td colspan="7" class="muted">${t("common.noData")}</td></tr>`;
+    return `<tr><td>${label}</td><td>${fmt(k.requests)}</td><td>${fmt(k.input_tokens)}</td><td>${fmt(k.cached_tokens)}</td><td>${fmt(k.output_tokens)}</td><td>${fmt(k.total_tokens)}</td>${cell(k)}</tr>`;
+  }).join("") || `<tr><td colspan="8" class="muted">${t("common.noData")}</td></tr>`;
   refreshRecent();
 }
 
@@ -1088,12 +1106,13 @@ $("toggle-auth").onchange = async () => {
 
 // ---------- Pricing editor ----------
 function renderPricing() {
-  const names = Object.keys(PRICING).sort((a, b) =>
-    a === "default" ? -1 : b === "default" ? 1 : a.localeCompare(b));
+  // No entry is special any more: the pricing table has no "default" fallback,
+  // so a leftover one in an existing database is deletable like any other row.
+  const names = Object.keys(PRICING).sort((a, b) => a.localeCompare(b));
   $("price-list").innerHTML = names.map(m => {
     const p = PRICING[m] || {};
     const cache = (p.cache_read != null) ? +p.cache_read : (+p.input || 0) * 0.1;
-    const del = m === "default" ? "" : `<button class="ghost" data-del="${esc(m)}">${t("price.delete")}</button>`;
+    const del = `<button class="ghost" data-del="${esc(m)}">${t("price.delete")}</button>`;
     return `<tr><td>${esc(m)}</td><td>$${(+p.input||0).toFixed(2)}</td><td>$${cache.toFixed(2)}</td><td>$${(+p.output||0).toFixed(2)}</td><td>${del}</td></tr>`;
   }).join("") || `<tr><td colspan="5" class="muted">${t("common.none")}</td></tr>`;
   document.querySelectorAll("#price-list button[data-del]").forEach(b =>

@@ -1,19 +1,20 @@
-"""Anthropic Messages API <-> OpenAI Chat Completions translation.
+"""Request helpers for the Anthropic-shaped endpoints.
 
-Claude Code (and other Anthropic-native clients) speak the ``/v1/messages``
-shape. Claude models on Copilot are only reachable through
-``/chat/completions``, so we translate in both directions, including:
+``/v1/messages`` is forwarded to Copilot byte-for-byte rather than translated:
+the upstream serves Claude models natively in the Anthropic shape, so
+rebuilding the request could only lose fields. What remains here is what
+passthrough still needs — mapping public model IDs onto Copilot slugs,
+dropping the few fields the upstream rejects, detecting image content for the
+Vision header, and estimating input tokens when a stream omits them.
 
-* system prompt, multimodal (image) content,
-* tool definitions, ``tool_use`` / ``tool_result`` round-trips,
-* streaming (Anthropic SSE event sequence synthesised from OpenAI deltas).
+The OpenAI<->Anthropic translation layer this module used to carry was removed
+once passthrough landed and it had no callers left. Recover it from git
+history if the upstream ever stops serving Claude in the native shape.
 """
 from __future__ import annotations
 
 import json
-import time
-import uuid
-from typing import Any, AsyncIterator
+from typing import Any
 
 
 # --------------------------------------------------------------------------- #
@@ -24,25 +25,45 @@ from typing import Any, AsyncIterator
 # slugs. Map the well-known official names onto the Copilot equivalents so a
 # client configured against api.anthropic.com works unchanged. Unknown names
 # are passed through verbatim (so Copilot-native slugs still work).
+# Verified against the live upstream model list. Only these Claude slugs are
+# actually served; requesting anything else returns model_not_supported.
+#   claude-opus-5 / 4.8 / 4.7 / 4.6
+#   claude-sonnet-5 / 4.6 / 4.5
+#   claude-haiku-4.5
 MODEL_ALIASES: dict[str, str] = {
-    # Claude 3.5 / 3.7 Sonnet
-    "claude-3-5-sonnet-20240620": "claude-3.5-sonnet",
-    "claude-3-5-sonnet-20241022": "claude-3.5-sonnet",
-    "claude-3-5-sonnet-latest": "claude-3.5-sonnet",
-    "claude-3-7-sonnet-20250219": "claude-3.7-sonnet",
-    "claude-3-7-sonnet-latest": "claude-3.7-sonnet",
-    # Claude 4.x Sonnet
-    "claude-sonnet-4-20250514": "claude-sonnet-4",
+    # Claude Opus
+    "claude-opus-4-5": "claude-opus-4.5",
+    "claude-opus-4-6": "claude-opus-4.6",
+    "claude-opus-4-7": "claude-opus-4.7",
+    "claude-opus-4-8": "claude-opus-4.8",
+    "claude-opus-5": "claude-opus-5",
+    "claude-opus-latest": "claude-opus-5",
+    # Claude Sonnet
     "claude-sonnet-4-5": "claude-sonnet-4.5",
     "claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
     "claude-sonnet-4-6": "claude-sonnet-4.6",
-    # Claude 4.x Opus
-    "claude-opus-4-20250514": "claude-opus-4",
-    "claude-opus-4-1-20250805": "claude-opus-4.1",
-    "claude-opus-4-7": "claude-opus-4.7",
-    # Claude 3.5 Haiku
-    "claude-3-5-haiku-20241022": "claude-3.5-haiku",
-    "claude-3-5-haiku-latest": "claude-3.5-haiku",
+    "claude-sonnet-5": "claude-sonnet-5",
+    "claude-sonnet-latest": "claude-sonnet-5",
+    # Claude Haiku
+    "claude-haiku-4-5": "claude-haiku-4.5",
+    "claude-3-5-haiku-20241022": "claude-haiku-4.5",
+    "claude-3-5-haiku-latest": "claude-haiku-4.5",
+    # Retired models -> nearest served equivalent, so older clients keep working
+    # rather than hard-failing with model_not_supported.
+    "claude-3-5-sonnet-20240620": "claude-sonnet-4.5",
+    "claude-3-5-sonnet-20241022": "claude-sonnet-4.5",
+    "claude-3-5-sonnet-latest": "claude-sonnet-4.5",
+    "claude-3-7-sonnet-20250219": "claude-sonnet-4.5",
+    "claude-3-7-sonnet-latest": "claude-sonnet-4.5",
+    "claude-3.5-sonnet": "claude-sonnet-4.5",
+    "claude-3.7-sonnet": "claude-sonnet-4.5",
+    "claude-3.5-haiku": "claude-haiku-4.5",
+    "claude-sonnet-4-20250514": "claude-sonnet-4.5",
+    "claude-sonnet-4": "claude-sonnet-4.5",
+    "claude-opus-4-20250514": "claude-opus-4.6",
+    "claude-opus-4-1-20250805": "claude-opus-4.6",
+    "claude-opus-4": "claude-opus-4.6",
+    "claude-opus-4.1": "claude-opus-4.6",
 }
 
 
@@ -74,6 +95,71 @@ def has_image_content(openai_payload: dict[str, Any]) -> bool:
                 if isinstance(part, dict) and part.get("type") == "image_url":
                     return True
     return False
+
+
+# Request fields the Anthropic API accepts but the Copilot backend rejects with
+# 400 "Extra inputs are not permitted". Verified against the live upstream --
+# see scripts/probe_rejected_fields.py, which re-runs the check.
+#
+# This matters only because we pass the body through verbatim. The old
+# translation layer rebuilt the request from the fields it understood, so it
+# dropped these as a side effect; passthrough forwards them and the upstream
+# refuses the whole request.
+#
+# `context_management` is the one that actually bites: Claude Code sends it on
+# every turn, so leaving it in makes the client fail 100% of the time. The
+# others are included because they fail the same way if a client sends them.
+UNSUPPORTED_UPSTREAM_FIELDS = (
+    "context_management",
+    "fallbacks",
+    "container",
+    "mcp_servers",
+)
+
+
+def strip_unsupported(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Drop request fields the Copilot backend cannot accept.
+
+    Returns ``(payload, dropped)``. The input is never mutated; when nothing
+    needs dropping the original object is returned unchanged so the common path
+    stays allocation-free.
+
+    Dropping is the right trade-off here: these fields tune behaviour
+    (context editing, server-side fallbacks, MCP) rather than determining the
+    answer, so a request that ignores them still returns a correct response --
+    whereas forwarding them returns nothing at all.
+    """
+    dropped = [f for f in UNSUPPORTED_UPSTREAM_FIELDS if f in payload]
+    if not dropped:
+        return payload, []
+    return {k: v for k, v in payload.items() if k not in dropped}, dropped
+
+
+def has_image_content_anthropic(payload: dict[str, Any]) -> bool:
+    """True if an Anthropic-shaped payload carries an image block anywhere.
+
+    Images may sit directly in a message's content list or nested inside a
+    ``tool_result`` block's own content list, so this recurses one level.
+    Used to set the ``Copilot-Vision-Request`` header on passthrough, where
+    the body is never converted to the OpenAI shape.
+    """
+    def _scan(blocks: Any) -> bool:
+        if not isinstance(blocks, list):
+            return False
+        for part in blocks:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image":
+                return True
+            # tool_result carries its own nested content list.
+            if part.get("type") == "tool_result" and _scan(part.get("content")):
+                return True
+        return False
+
+    for msg in payload.get("messages") or []:
+        if isinstance(msg, dict) and _scan(msg.get("content")):
+            return True
+    return _scan(payload.get("system"))
 
 
 # --------------------------------------------------------------------------- #
@@ -122,414 +208,3 @@ def estimate_prompt_tokens(openai_payload: dict[str, Any]) -> int:
         except (TypeError, ValueError):
             pass
     return total
-
-
-def _content_to_openai(content: Any) -> Any:
-    """Convert Anthropic message content to OpenAI content (str or parts)."""
-    if isinstance(content, str):
-        return content
-    parts: list[dict[str, Any]] = []
-    for block in content or []:
-        btype = block.get("type")
-        if btype == "text":
-            parts.append({"type": "text", "text": block.get("text", "")})
-        elif btype == "image":
-            src = block.get("source", {})
-            if src.get("type") == "base64":
-                url = f"data:{src.get('media_type')};base64,{src.get('data')}"
-            else:
-                url = src.get("url", "")
-            parts.append({"type": "image_url", "image_url": {"url": url}})
-    # Collapse a single text part back to a plain string.
-    if len(parts) == 1 and parts[0]["type"] == "text":
-        return parts[0]["text"]
-    return parts
-
-
-def _split_tool_result(
-    tr: dict[str, Any]
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Split one Anthropic ``tool_result`` into (tool_message, image_parts).
-
-    The OpenAI ``tool`` role only accepts text, so image blocks returned by a
-    tool (e.g. Claude Code's ``Read`` on an image) cannot ride the tool message
-    — they must be forwarded on a following ``user`` message. This returns the
-    text-only ``tool`` message (keyed by ``tool_use_id``) plus any images as
-    OpenAI ``image_url`` parts for the caller to attach downstream. Dropping
-    them here is exactly the bug this guards against.
-    """
-    tr_content = tr.get("content")
-    text = ""
-    image_parts: list[dict[str, Any]] = []
-
-    if isinstance(tr_content, list):
-        text_chunks: list[str] = []
-        for c in tr_content:
-            ctype = c.get("type")
-            if ctype == "text":
-                text_chunks.append(c.get("text", ""))
-            elif ctype == "image":
-                src = c.get("source", {})
-                if src.get("type") == "base64":
-                    url = f"data:{src.get('media_type')};base64,{src.get('data')}"
-                else:
-                    url = src.get("url", "")
-                if url:
-                    image_parts.append(
-                        {"type": "image_url", "image_url": {"url": url}}
-                    )
-        text = "".join(text_chunks)
-    elif isinstance(tr_content, str):
-        text = tr_content
-    else:
-        text = json.dumps(tr_content)
-
-    # A tool message must not be empty when the result was image-only.
-    if not text and image_parts:
-        text = "[image returned by tool; see the following message]"
-
-    tool_msg = {
-        "role": "tool",
-        "tool_call_id": tr.get("tool_use_id"),
-        "content": text,
-    }
-    return tool_msg, image_parts
-
-
-def anthropic_to_openai(req: dict[str, Any]) -> dict[str, Any]:
-    """Translate an Anthropic /v1/messages request to OpenAI chat payload."""
-    messages: list[dict[str, Any]] = []
-
-    system = req.get("system")
-    if isinstance(system, str) and system:
-        messages.append({"role": "system", "content": system})
-    elif isinstance(system, list):
-        text = "".join(
-            b.get("text", "") for b in system if b.get("type") == "text"
-        )
-        if text:
-            messages.append({"role": "system", "content": text})
-
-    for msg in req.get("messages", []):
-        role = msg.get("role")
-        content = msg.get("content")
-
-        if isinstance(content, list):
-            tool_results = [b for b in content if b.get("type") == "tool_result"]
-            tool_uses = [b for b in content if b.get("type") == "tool_use"]
-            other = [
-                b for b in content if b.get("type") not in ("tool_result", "tool_use")
-            ]
-
-            # tool_result blocks become standalone OpenAI 'tool' messages.
-            # Any images they carry can't ride a 'tool' message (OpenAI only
-            # allows text there), so collect them and forward on a 'user'
-            # message right after — otherwise they'd be silently dropped.
-            tool_result_images: list[dict[str, Any]] = []
-            for tr in tool_results:
-                tool_msg, image_parts = _split_tool_result(tr)
-                messages.append(tool_msg)
-                tool_result_images.extend(image_parts)
-            if tool_result_images:
-                messages.append({"role": "user", "content": tool_result_images})
-
-            if role == "assistant" and tool_uses:
-                tool_calls = [
-                    {
-                        "id": tu.get("id"),
-                        "type": "function",
-                        "function": {
-                            "name": tu.get("name"),
-                            "arguments": json.dumps(tu.get("input", {})),
-                        },
-                    }
-                    for tu in tool_uses
-                ]
-                text = "".join(
-                    b.get("text", "") for b in other if b.get("type") == "text"
-                )
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": text or None,
-                        "tool_calls": tool_calls,
-                    }
-                )
-            elif other:
-                messages.append({"role": role, "content": _content_to_openai(other)})
-        else:
-            messages.append({"role": role, "content": content})
-
-    payload: dict[str, Any] = {
-        "model": map_model(req.get("model")),
-        "messages": messages,
-    }
-    if req.get("max_tokens") is not None:
-        payload["max_tokens"] = req["max_tokens"]
-    for key in ("temperature", "top_p", "stop_sequences", "stream"):
-        if key in req:
-            payload["stop" if key == "stop_sequences" else key] = req[key]
-
-    if req.get("tools"):
-        payload["tools"] = [
-            {
-                "type": "function",
-                "function": {
-                    "name": t.get("name"),
-                    "description": t.get("description", ""),
-                    "parameters": t.get("input_schema", {"type": "object"}),
-                },
-            }
-            for t in req["tools"]
-        ]
-        tc = req.get("tool_choice")
-        if isinstance(tc, dict):
-            ttype = tc.get("type")
-            if ttype == "auto":
-                payload["tool_choice"] = "auto"
-            elif ttype == "any":
-                payload["tool_choice"] = "required"
-            elif ttype == "tool" and tc.get("name"):
-                payload["tool_choice"] = {
-                    "type": "function",
-                    "function": {"name": tc["name"]},
-                }
-
-    return payload
-
-
-_STOP_MAP = {
-    "stop": "end_turn",
-    "length": "max_tokens",
-    "tool_calls": "tool_use",
-    "content_filter": "end_turn",
-    "function_call": "tool_use",
-}
-
-
-def openai_to_anthropic_response(
-    resp: dict[str, Any], model: str
-) -> dict[str, Any]:
-    """Translate a buffered OpenAI chat completion into an Anthropic message."""
-    choice = (resp.get("choices") or [{}])[0]
-    msg = choice.get("message", {}) or {}
-
-    content_blocks: list[dict[str, Any]] = []
-    text = msg.get("content")
-    if isinstance(text, str) and text:
-        content_blocks.append({"type": "text", "text": text})
-    elif isinstance(text, list):
-        for part in text:
-            if part.get("type") in ("text", "output_text"):
-                content_blocks.append({"type": "text", "text": part.get("text", "")})
-
-    for tc in msg.get("tool_calls") or []:
-        fn = tc.get("function", {})
-        try:
-            args = json.loads(fn.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {}
-        content_blocks.append(
-            {
-                "type": "tool_use",
-                "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
-                "name": fn.get("name"),
-                "input": args,
-            }
-        )
-
-    if not content_blocks:
-        content_blocks.append({"type": "text", "text": ""})
-
-    usage = resp.get("usage") or {}
-    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-    return {
-        "id": resp.get("id") or f"msg_{uuid.uuid4().hex[:24]}",
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": content_blocks,
-        "stop_reason": _STOP_MAP.get(choice.get("finish_reason"), "end_turn"),
-        "stop_sequence": None,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-            "cache_read_input_tokens": cached,
-        },
-    }
-
-
-# --------------------------------------------------------------------------- #
-# Streaming: OpenAI SSE deltas -> Anthropic SSE events
-# --------------------------------------------------------------------------- #
-def _sse(event: str, data: dict[str, Any]) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
-
-
-def _iter_openai_sse(line_buffer: str) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for line in line_buffer.split("\n"):
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[len("data:"):].strip()
-        if not data or data == "[DONE]":
-            continue
-        try:
-            out.append(json.loads(data))
-        except json.JSONDecodeError:
-            continue
-    return out
-
-
-async def stream_openai_to_anthropic(
-    source: AsyncIterator[bytes], model: str
-) -> AsyncIterator[tuple[bytes, dict[str, Any] | None]]:
-    """Consume an OpenAI chat SSE stream and yield Anthropic SSE event bytes.
-
-    Yields ``(sse_bytes, usage_or_None)``. The final tuple carries the usage
-    dict (``{input_tokens, output_tokens}``) so the caller can record stats.
-    """
-    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
-    yield _sse(
-        "message_start",
-        {
-            "type": "message_start",
-            "message": {
-                "id": msg_id,
-                "type": "message",
-                "role": "assistant",
-                "model": model,
-                "content": [],
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
-            },
-        },
-    ), None
-
-    # Block bookkeeping. index 0 is reserved for text once it appears.
-    text_open = False
-    # OpenAI tool_call index -> anthropic content block index
-    tool_blocks: dict[int, int] = {}
-    next_block_index = 0
-    finish_reason: str | None = None
-    usage: dict[str, Any] | None = None
-
-    buffer = ""
-    async for chunk in source:
-        buffer += chunk.decode("utf-8", "replace")
-        # Process complete SSE records (terminated by blank line).
-        while "\n\n" in buffer:
-            record, buffer = buffer.split("\n\n", 1)
-            for data in _iter_openai_sse(record):
-                if data.get("usage"):
-                    u = data["usage"]
-                    usage = {
-                        "input_tokens": u.get("prompt_tokens", 0),
-                        "output_tokens": u.get("completion_tokens", 0),
-                        "cache_read_input_tokens": (
-                            u.get("prompt_tokens_details") or {}
-                        ).get("cached_tokens", 0),
-                    }
-                choices = data.get("choices") or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta", {}) or {}
-                if choice.get("finish_reason"):
-                    finish_reason = choice["finish_reason"]
-
-                # Text delta.
-                text_piece = delta.get("content")
-                if isinstance(text_piece, str) and text_piece:
-                    if not text_open:
-                        text_open = True
-                        if next_block_index == 0:
-                            text_index = 0
-                            next_block_index = 1
-                        else:
-                            text_index = next_block_index
-                            next_block_index += 1
-                        # Remember the text block index.
-                        tool_blocks[-1] = text_index
-                        yield _sse(
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": text_index,
-                                "content_block": {"type": "text", "text": ""},
-                            },
-                        ), None
-                    yield _sse(
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": tool_blocks[-1],
-                            "delta": {"type": "text_delta", "text": text_piece},
-                        },
-                    ), None
-
-                # Tool call deltas.
-                for tc in delta.get("tool_calls") or []:
-                    tc_idx = tc.get("index", 0)
-                    fn = tc.get("function", {}) or {}
-                    if tc_idx not in tool_blocks:
-                        block_index = next_block_index
-                        next_block_index += 1
-                        tool_blocks[tc_idx] = block_index
-                        yield _sse(
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": block_index,
-                                "content_block": {
-                                    "type": "tool_use",
-                                    "id": tc.get("id")
-                                    or f"toolu_{uuid.uuid4().hex[:24]}",
-                                    "name": fn.get("name", ""),
-                                    "input": {},
-                                },
-                            },
-                        ), None
-                    args = fn.get("arguments")
-                    if args:
-                        yield _sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": tool_blocks[tc_idx],
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": args,
-                                },
-                            },
-                        ), None
-
-    # Close any open blocks.
-    if text_open:
-        yield _sse(
-            "content_block_stop",
-            {"type": "content_block_stop", "index": tool_blocks[-1]},
-        ), None
-    for _, block_index in sorted(
-        ((k, v) for k, v in tool_blocks.items() if k >= 0), key=lambda x: x[1]
-    ):
-        yield _sse(
-            "content_block_stop",
-            {"type": "content_block_stop", "index": block_index},
-        ), None
-
-    out_usage = usage or {"input_tokens": 0, "output_tokens": 0}
-    yield _sse(
-        "message_delta",
-        {
-            "type": "message_delta",
-            "delta": {
-                "stop_reason": _STOP_MAP.get(finish_reason, "end_turn"),
-                "stop_sequence": None,
-            },
-            "usage": {"output_tokens": out_usage.get("output_tokens", 0)},
-        },
-    ), None
-    yield _sse("message_stop", {"type": "message_stop"}), out_usage

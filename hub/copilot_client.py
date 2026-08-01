@@ -10,6 +10,7 @@ adapted for a long-running server: the OAuth token lives in the SQLite store
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from typing import Any, AsyncIterator
 
@@ -184,14 +185,31 @@ async def post_json(
     return r.status_code, body
 
 
-async def stream(
+async def open_stream(
     path: str,
     payload: dict[str, Any],
     extra_headers: dict[str, str] | None = None,
-) -> AsyncIterator[bytes]:
-    """Streaming POST. Yields raw SSE bytes from the Copilot backend."""
+) -> tuple[AsyncIterator[bytes], int]:
+    """Begin a streaming POST and return ``(chunks, status)`` once connected.
+
+    Everything that can fail -- resolving the API token, connecting, and the
+    upstream's own status code -- happens before this returns, so the caller
+    can still emit a proper HTTP error. The returned iterator only yields body
+    bytes, and closes the response when exhausted.
+
+    Connecting up front is what makes streaming endpoints usable at all. A
+    plain async generator defers every failure to its first iteration, which
+    for a caller wrapping it in a StreamingResponse is already too late: the
+    200 and the chunked-transfer header are out, so raising can only abort the
+    connection mid-body. That leaves a truncated chunked stream -- which curl
+    tolerates silently, while Node's undici (Claude Code) and Python's
+    http.client raise. The bug is invisible through curl.
+
+    Raises the same exceptions as :func:`post_json` (NotAuthenticatedError,
+    RuntimeError on a non-200) rather than deferring them into the stream.
+    """
     token, endpoint = await get_api_token()
-    async with _client().stream(
+    ctx = _client().stream(
         "POST",
         f"{endpoint}{path}",
         headers={
@@ -202,9 +220,23 @@ async def stream(
             **(extra_headers or {}),
         },
         json=payload,
-    ) as resp:
+    )
+    resp = await ctx.__aenter__()
+    try:
         if resp.status_code != 200:
             body = await resp.aread()
-            raise RuntimeError(f"{resp.status_code}: {body.decode('utf-8', 'replace')}")
-        async for chunk in resp.aiter_bytes():
-            yield chunk
+            raise RuntimeError(
+                f"{resp.status_code}: {body.decode('utf-8', 'replace')}"
+            )
+    except BaseException:
+        await ctx.__aexit__(*sys.exc_info())
+        raise
+
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await ctx.__aexit__(None, None, None)
+
+    return body(), resp.status_code

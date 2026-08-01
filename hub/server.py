@@ -24,6 +24,7 @@ Management portal API:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -36,6 +37,7 @@ from . import image_client as ic
 from . import store
 from .config import get_settings
 
+log = logging.getLogger("hub")
 app = FastAPI(title="GitModel Hub", version="0.1.0")
 _STATIC = Path(__file__).parent / "static"
 
@@ -158,6 +160,43 @@ def _login_success(ip: str) -> None:
     _LOGIN_ATTEMPTS.pop(ip, None)
 
 
+def _copilot_usage(obj: dict[str, Any] | None) -> tuple[int, dict[str, int]]:
+    """Extract Copilot's authoritative billing block.
+
+    Returns ``(total_nano_aiu, {token_type: count})``. Copilot attaches a
+    ``copilot_usage`` block to the OpenAI, Responses and Anthropic shapes
+    alike, on buffered responses and once per stream. ``total_nano_aiu`` is its
+    own computed charge (verified to equal the sum of count x rate on every
+    model tested), so we take it verbatim rather than recomputing.
+
+    ``token_details`` is variable-length -- do not assume a fixed set of
+    buckets. Most models report four (input / output / cache_read /
+    cache_write), but gpt-5.5, grok-4.5 and mai-code-1-flash-picker report
+    three, omitting cache_write entirely. Reading by key, as below, degrades
+    correctly: an absent bucket simply reads as 0.
+
+    Some models report an all-zero rate -- they bill against the flat Copilot
+    premium-request quota rather than per token -- and come back as 0 nano_aiu,
+    so the caller falls back to the local pricing table. This is not a
+    vendor-wide property: among Azure OpenAI models gpt-4o reports zero while
+    gpt-4 reports a real rate, so never infer it from the model name.
+    """
+    if not isinstance(obj, dict):
+        return 0, {}
+    cu = obj.get("copilot_usage")
+    if not isinstance(cu, dict):
+        return 0, {}
+    counts: dict[str, int] = {}
+    for d in cu.get("token_details") or []:
+        if isinstance(d, dict) and d.get("token_type"):
+            counts[str(d["token_type"])] = int(d.get("token_count") or 0)
+    try:
+        nano = int(cu.get("total_nano_aiu") or 0)
+    except (TypeError, ValueError):
+        nano = 0
+    return nano, counts
+
+
 def _norm_usage(usage: dict[str, Any] | None, *, responses_shape: bool) -> tuple[int, int, int, int]:
     if not usage:
         return 0, 0, 0, 0
@@ -179,7 +218,7 @@ def _norm_usage(usage: dict[str, Any] | None, *, responses_shape: bool) -> tuple
 
 def _record(
     *, client_key, model, served, endpoint, usage3, streamed, estimated,
-    status=200, cached=0,
+    status=200, cached=0, cache_write=0, nano_aiu=0,
 ) -> None:
     i, o, t = usage3
     store.record_usage(
@@ -194,11 +233,23 @@ def _record(
         estimated=estimated,
         status=status,
         cached_tokens=cached,
+        cache_write_tokens=cache_write,
+        nano_aiu=nano_aiu,
     )
 
 
-def _parse_sse_usage(text: str, *, responses_shape: bool) -> dict[str, Any] | None:
+def _parse_sse_usage(
+    text: str, *, responses_shape: bool
+) -> tuple[dict[str, Any] | None, int, dict[str, int]]:
+    """Scrape the final usage and Copilot billing block out of an SSE stream.
+
+    Returns ``(usage, nano_aiu, copilot_counts)``. Copilot emits its
+    ``copilot_usage`` block exactly once per stream, carrying final totals
+    (not increments), so last-one-wins is safe and cannot double-count.
+    """
     usage: dict[str, Any] | None = None
+    nano = 0
+    counts: dict[str, int] = {}
     for line in text.split("\n"):
         line = line.strip()
         if not line.startswith("data:"):
@@ -210,6 +261,11 @@ def _parse_sse_usage(text: str, *, responses_shape: bool) -> dict[str, Any] | No
             obj = json.loads(payload)
         except json.JSONDecodeError:
             continue
+        if not isinstance(obj, dict):
+            continue
+        n, c = _copilot_usage(obj)
+        if n or c:
+            nano, counts = n, c
         if responses_shape:
             resp = obj.get("response") if isinstance(obj, dict) else None
             cand = (resp or {}).get("usage") if isinstance(resp, dict) else None
@@ -218,7 +274,7 @@ def _parse_sse_usage(text: str, *, responses_shape: bool) -> dict[str, Any] | No
             cand = obj.get("usage")
         if cand:
             usage = cand
-    return usage
+    return usage, nano, counts
 
 
 # =========================================================================== #
@@ -288,9 +344,11 @@ async def _passthrough(
             return JSONResponse(data, status_code=status)
         served = data.get("model") if isinstance(data, dict) else None
         i, o, t, cached = _norm_usage(data.get("usage"), responses_shape=responses_shape)
+        nano, counts = _copilot_usage(data)
         _record(client_key=client_key, model=model, served=served,
                 endpoint=endpoint, usage3=(i, o, t), streamed=False,
-                estimated=False, cached=cached)
+                estimated=False, cached=cached or counts.get("cache_read", 0),
+                cache_write=counts.get("cache_write", 0), nano_aiu=nano)
         return JSONResponse(data)
 
     # Streaming passthrough. Ask the backend to report usage for chat.
@@ -300,15 +358,37 @@ async def _passthrough(
             body["stream_options"].setdefault("include_usage", True)
     est_input = aa.estimate_prompt_tokens(body)
 
+    # Connect up front so failures are real HTTP errors, not a truncated
+    # chunked body. See the matching comment in v1_messages.
+    try:
+        chunks, _ = await cc.open_stream(path, body, vision_headers)
+    except cc.NotAuthenticatedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except RuntimeError as e:
+        log.error("upstream stream failed path=%s model=%s: %s", path, model, e)
+        _record(client_key=client_key, model=model, served=None,
+                endpoint=endpoint, usage3=(0, 0, 0), streamed=True,
+                estimated=False, status=502)
+        raise HTTPException(status_code=502, detail=str(e))
+
     async def gen() -> AsyncIterator[bytes]:
         collected: list[str] = []
         try:
-            async for chunk in cc.stream(path, body, vision_headers):
+            async for chunk in chunks:
                 collected.append(chunk.decode("utf-8", "replace"))
                 yield chunk
         finally:
-            usage = _parse_sse_usage("".join(collected), responses_shape=responses_shape)
+            usage, nano, counts = _parse_sse_usage(
+                "".join(collected), responses_shape=responses_shape
+            )
             i, o, t, cached = _norm_usage(usage, responses_shape=responses_shape)
+            # Copilot's own counts are authoritative when present.
+            if counts.get("input"):
+                i = counts["input"]
+            if counts.get("output"):
+                o = counts["output"]
+            cached = cached or counts.get("cache_read", 0)
+            t = t or (i + o)
             # Backend often omits prompt_tokens on streams — estimate input.
             input_estimated = not i
             if input_estimated:
@@ -316,7 +396,9 @@ async def _passthrough(
                 t = i + o
             _record(client_key=client_key, model=model, served=None,
                     endpoint=endpoint, usage3=(i, o, t), streamed=True,
-                    estimated=usage is None or input_estimated, cached=cached)
+                    estimated=(usage is None and not nano) or input_estimated,
+                    cached=cached, cache_write=counts.get("cache_write", 0),
+                    nano_aiu=nano)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -395,8 +477,51 @@ async def v1_images_edits(request: Request) -> Any:
 # =========================================================================== #
 # Anthropic-compatible endpoint
 # =========================================================================== #
+@app.post("/v1/messages/count_tokens")
+async def v1_messages_count_tokens(request: Request) -> Any:
+    """Anthropic token-counting endpoint — passed through to Copilot.
+
+    Claude Code calls this to size the context before a turn. It is optional:
+    with no route here the client falls back to estimating locally, which is
+    how this gateway ran until now and worked fine. Serving it replaces that
+    estimate with the upstream's own model-specific count.
+
+    Declared before /v1/messages purely for readability — Starlette matches on
+    the full path, so the more specific route does not need to come first.
+
+    No usage row is recorded: counting is free and billed nothing upstream, so
+    logging it would inflate the request count with rows that have no tokens.
+    """
+    _check_client_auth(request)
+    body = await request.json()
+    if not cc.is_authenticated():
+        raise HTTPException(status_code=503, detail="Hub not logged in to Copilot")
+
+    mapped = aa.map_model(body.get("model"))
+    if mapped != body.get("model"):
+        body = {**body, "model": mapped}
+    body, _ = aa.strip_unsupported(body)
+    try:
+        status, data = await cc.post_json("/v1/messages/count_tokens", body)
+    except cc.NotAuthenticatedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except RuntimeError as e:
+        # A failed token exchange raises rather than returning a status, and an
+        # unhandled one here becomes an opaque 500. Surface the upstream reason
+        # so a client sees "Bad credentials" instead of Internal Server Error.
+        raise HTTPException(status_code=502, detail=str(e))
+    return JSONResponse(data, status_code=status)
+
+
 @app.post("/v1/messages")
 async def v1_messages(request: Request) -> Any:
+    """Anthropic Messages API — passed straight through to Copilot.
+
+    Copilot serves the Anthropic shape natively at ``/v1/messages`` (verified:
+    native content blocks, real stop_reason, and the full SSE event sequence),
+    so no translation happens here. Only the model name is mapped, since the
+    backend knows its own slugs rather than the official dated model IDs.
+    """
     client_key = _check_client_auth(request)
     req = await request.json()
     model = req.get("model")
@@ -405,66 +530,115 @@ async def v1_messages(request: Request) -> Any:
     if not cc.is_authenticated():
         raise HTTPException(status_code=503, detail="Hub not logged in to Copilot")
 
-    openai_payload = aa.anthropic_to_openai(req)
+    mapped = aa.map_model(model)
+    if mapped != model:
+        req = {**req, "model": mapped}
+
+    # Passthrough forwards the body verbatim, which means fields the Anthropic
+    # API accepts but Copilot does not reach the upstream and get the whole
+    # request rejected. Claude Code sends context_management on every turn, so
+    # this is the difference between working and failing outright.
+    req, dropped = aa.strip_unsupported(req)
+    if dropped:
+        log.info("dropped unsupported fields for upstream: %s", ", ".join(dropped))
+
     vision_headers = (
         {"Copilot-Vision-Request": "true"}
-        if aa.has_image_content(openai_payload)
+        if aa.has_image_content_anthropic(req)
         else None
     )
 
     if not stream:
-        openai_payload.pop("stream", None)
         try:
-            status, data = await cc.post_json(
-                "/chat/completions", openai_payload, vision_headers
-            )
+            status, data = await cc.post_json("/v1/messages", req, vision_headers)
         except cc.NotAuthenticatedError as e:
             raise HTTPException(status_code=503, detail=str(e))
         if status != 200:
             _record(client_key=client_key, model=model, served=None,
                     endpoint="messages", usage3=(0, 0, 0), streamed=False,
                     estimated=False, status=status)
-            return JSONResponse(
-                {"type": "error", "error": {"type": "api_error",
-                 "message": json.dumps(data)}},
-                status_code=status,
-            )
-        anth = aa.openai_to_anthropic_response(data, model)
-        u = anth["usage"]
+            return JSONResponse(data, status_code=status)
+        u = data.get("usage") or {}
+        i = u.get("input_tokens", 0)
+        o = u.get("output_tokens", 0)
+        nano, counts = _copilot_usage(data)
         _record(client_key=client_key, model=model, served=data.get("model"),
-                endpoint="messages",
-                usage3=(u["input_tokens"], u["output_tokens"],
-                        u["input_tokens"] + u["output_tokens"]),
+                endpoint="messages", usage3=(i, o, i + o),
                 streamed=False, estimated=False,
-                cached=u.get("cache_read_input_tokens", 0))
-        return JSONResponse(anth)
+                cached=u.get("cache_read_input_tokens", 0),
+                cache_write=u.get("cache_creation_input_tokens", 0),
+                nano_aiu=nano)
+        return JSONResponse(data)
 
-    # Streaming: translate OpenAI SSE -> Anthropic SSE.
-    openai_payload["stream"] = True
-    openai_payload.setdefault("stream_options", {"include_usage": True})
-    est_input = aa.estimate_prompt_tokens(openai_payload)
+    # Connect before returning a StreamingResponse. Once that response starts,
+    # the 200 and the chunked header are already on the wire and any error can
+    # only truncate the body -- which strict clients (Node undici, Python
+    # http.client) reject as a protocol error rather than surfacing the real
+    # cause. Failing here instead keeps a bad token or a 5xx upstream an
+    # ordinary, readable HTTP error.
+    try:
+        chunks, _ = await cc.open_stream("/v1/messages", req, vision_headers)
+    except cc.NotAuthenticatedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except RuntimeError as e:
+        # Log before converting to an HTTPException: the upstream's own message
+        # (model not supported, payload rejected, quota, ...) is the only clue
+        # to why a request failed, and wrapping it in a 502 hides it from the
+        # server log entirely. Include the model so a failure that is specific
+        # to one model is visible without reproducing it.
+        log.error("upstream stream failed model=%s: %s", req.get("model"), e)
+        _record(client_key=client_key, model=model, served=None,
+                endpoint="messages", usage3=(0, 0, 0), streamed=True,
+                estimated=False, status=502)
+        raise HTTPException(status_code=502, detail=str(e))
 
     async def gen() -> AsyncIterator[bytes]:
-        final_usage: dict[str, Any] | None = None
+        collected: list[str] = []
         try:
-            source = cc.stream("/chat/completions", openai_payload, vision_headers)
-            async for sse_bytes, usage in aa.stream_openai_to_anthropic(source, model):
-                if usage is not None:
-                    final_usage = usage
-                yield sse_bytes
+            async for chunk in chunks:
+                collected.append(chunk.decode("utf-8", "replace"))
+                yield chunk
         finally:
-            i = (final_usage or {}).get("input_tokens", 0)
-            o = (final_usage or {}).get("output_tokens", 0)
-            cached = (final_usage or {}).get("cache_read_input_tokens", 0)
-            # Copilot's streaming SSE usually omits prompt_tokens — fall back
-            # to a local estimate so input usage isn't silently lost.
-            input_estimated = not i
-            if input_estimated:
-                i = est_input
+            text = "".join(collected)
+            nano, counts = 0, {}
+            i = o = cached = cache_write = 0
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    obj = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                n, c = _copilot_usage(obj)
+                if n or c:
+                    nano, counts = n, c
+                # usage appears on message_start (input) and message_delta
+                # (output); merge rather than overwrite.
+                for src in (obj.get("usage"), (obj.get("message") or {}).get("usage")
+                            if isinstance(obj.get("message"), dict) else None):
+                    if not isinstance(src, dict):
+                        continue
+                    i = src.get("input_tokens", i) or i
+                    o = src.get("output_tokens", o) or o
+                    cached = src.get("cache_read_input_tokens", cached) or cached
+                    cache_write = (
+                        src.get("cache_creation_input_tokens", cache_write) or cache_write
+                    )
+            # Copilot's own counts are authoritative when present.
+            i = counts.get("input") or i
+            o = counts.get("output") or o
+            cached = counts.get("cache_read") or cached
+            cache_write = counts.get("cache_write") or cache_write
             _record(client_key=client_key, model=model, served=None,
                     endpoint="messages", usage3=(i, o, i + o),
-                    streamed=True, estimated=final_usage is None or input_estimated,
-                    cached=cached)
+                    streamed=True, estimated=not (i or nano),
+                    cached=cached, cache_write=cache_write, nano_aiu=nano)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
