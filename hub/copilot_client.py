@@ -10,6 +10,7 @@ adapted for a long-running server: the OAuth token lives in the SQLite store
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from typing import Any, AsyncIterator
@@ -38,6 +39,34 @@ _http_client: httpx.AsyncClient | None = None
 
 class NotAuthenticatedError(RuntimeError):
     """Raised when no Copilot OAuth token is configured."""
+
+
+class UpstreamError(RuntimeError):
+    """A non-200 from the Copilot backend, with status and body kept intact.
+
+    Subclasses RuntimeError so existing ``except RuntimeError`` handlers still
+    catch it, but carries the two things a caller needs to mirror the upstream
+    response rather than flatten it: the status code and the parsed body. The
+    string form stays ``"<status>: <raw>"`` for logs.
+    """
+
+    def __init__(self, status_code: int, raw: str) -> None:
+        super().__init__(f"{status_code}: {raw}")
+        self.status_code = status_code
+        self.raw = raw
+
+    @property
+    def body(self) -> dict[str, Any]:
+        """Upstream body as JSON, wrapped in an error envelope if unparseable.
+
+        Matches what :func:`post_json` returns for the same response, so both
+        paths hand the caller the same shape.
+        """
+        try:
+            parsed = json.loads(self.raw)
+        except ValueError:
+            parsed = None
+        return parsed if isinstance(parsed, dict) else {"error": {"message": self.raw}}
 
 
 def _client() -> httpx.AsyncClient:
@@ -205,8 +234,9 @@ async def open_stream(
     tolerates silently, while Node's undici (Claude Code) and Python's
     http.client raise. The bug is invisible through curl.
 
-    Raises the same exceptions as :func:`post_json` (NotAuthenticatedError,
-    RuntimeError on a non-200) rather than deferring them into the stream.
+    Raises NotAuthenticatedError, or UpstreamError on a non-200 -- the latter
+    carrying the upstream status and body so the caller can mirror them
+    instead of collapsing every failure into one status.
     """
     token, endpoint = await get_api_token()
     ctx = _client().stream(
@@ -225,8 +255,8 @@ async def open_stream(
     try:
         if resp.status_code != 200:
             body = await resp.aread()
-            raise RuntimeError(
-                f"{resp.status_code}: {body.decode('utf-8', 'replace')}"
+            raise UpstreamError(
+                resp.status_code, body.decode("utf-8", "replace")
             )
     except BaseException:
         await ctx.__aexit__(*sys.exc_info())

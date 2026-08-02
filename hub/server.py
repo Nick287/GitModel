@@ -216,6 +216,21 @@ def _norm_usage(usage: dict[str, Any] | None, *, responses_shape: bool) -> tuple
     return i, o, t, cached
 
 
+def _passthrough_status(upstream: int) -> int:
+    """Map an upstream status onto one that means the same thing to our client.
+
+    Client-side 4xx pass through unchanged: a rejected parameter is the
+    caller's to fix, and relabelling it 502 both hides the cause and invites a
+    retry that cannot succeed. The exceptions are 401/403, which mean *our*
+    Copilot credentials were rejected -- the caller's key was already accepted
+    at the door, so echoing 401 would send them to audit a key that is fine.
+    Upstream 5xx stay 502: the failure is above us, not in us.
+    """
+    if upstream in (401, 403) or upstream >= 500:
+        return 502
+    return upstream
+
+
 def _record(
     *, client_key, model, served, endpoint, usage3, streamed, estimated,
     status=200, cached=0, cache_write=0, nano_aiu=0,
@@ -364,8 +379,22 @@ async def _passthrough(
         chunks, _ = await cc.open_stream(path, body, vision_headers)
     except cc.NotAuthenticatedError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    except RuntimeError as e:
+    except cc.UpstreamError as e:
+        # Mirror the upstream failure the same way the non-streaming branch
+        # above does. Collapsing it into a 502 destroys the one thing that
+        # explains the request: a rejected parameter then reads as "the
+        # gateway is broken" instead of "this model does not take that
+        # field", and invites a retry that cannot succeed.
         log.error("upstream stream failed path=%s model=%s: %s", path, model, e)
+        status = _passthrough_status(e.status_code)
+        _record(client_key=client_key, model=model, served=None,
+                endpoint=endpoint, usage3=(0, 0, 0), streamed=True,
+                estimated=False, status=status)
+        return JSONResponse(e.body, status_code=status)
+    except RuntimeError as e:
+        # Not the upstream's verdict -- a token exchange or transport failure
+        # on our side, which is what 502 actually describes.
+        log.error("stream setup failed path=%s model=%s: %s", path, model, e)
         _record(client_key=client_key, model=model, served=None,
                 endpoint=endpoint, usage3=(0, 0, 0), streamed=True,
                 estimated=False, status=502)
@@ -580,13 +609,25 @@ async def v1_messages(request: Request) -> Any:
         chunks, _ = await cc.open_stream("/v1/messages", req, vision_headers)
     except cc.NotAuthenticatedError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    except RuntimeError as e:
-        # Log before converting to an HTTPException: the upstream's own message
-        # (model not supported, payload rejected, quota, ...) is the only clue
-        # to why a request failed, and wrapping it in a 502 hides it from the
-        # server log entirely. Include the model so a failure that is specific
-        # to one model is visible without reproducing it.
+    except cc.UpstreamError as e:
+        # Log the upstream's own message (model not supported, payload
+        # rejected, quota, ...) -- it is the only clue to why a request
+        # failed, and it would otherwise appear nowhere in the server log.
+        # Include the model so a failure specific to one model is visible
+        # without reproducing it. Then hand the client the upstream status
+        # and body verbatim, exactly as the non-streaming branch does: a 400
+        # for an unsupported parameter has to reach the caller as a 400, or
+        # the only actionable part of the answer is lost.
         log.error("upstream stream failed model=%s: %s", req.get("model"), e)
+        status = _passthrough_status(e.status_code)
+        _record(client_key=client_key, model=model, served=None,
+                endpoint="messages", usage3=(0, 0, 0), streamed=True,
+                estimated=False, status=status)
+        return JSONResponse(e.body, status_code=status)
+    except RuntimeError as e:
+        # Not the upstream's verdict -- a token exchange or transport failure
+        # on our side, which is what 502 actually describes.
+        log.error("stream setup failed model=%s: %s", req.get("model"), e)
         _record(client_key=client_key, model=model, served=None,
                 endpoint="messages", usage3=(0, 0, 0), streamed=True,
                 estimated=False, status=502)
