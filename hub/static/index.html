@@ -54,6 +54,10 @@
   .badge.on::before { background:var(--green); box-shadow:0 0 8px var(--green); }
   .badge.off { color:var(--red); border-color:rgba(248,81,73,.4); background:rgba(248,81,73,.08); }
   .badge.off::before { background:var(--red); }
+  /* Credentials stored but rejected by GitHub -- neither connected nor
+     signed out, and the fix (sign in again) differs from both. */
+  .badge.warn { color:var(--amber); border-color:rgba(210,153,34,.4); background:rgba(210,153,34,.08); }
+  .badge.warn::before { background:var(--amber); box-shadow:0 0 8px var(--amber); }
 
   main { max-width:1040px; margin:0 auto; padding:28px 24px 60px; }
 
@@ -559,6 +563,8 @@ const I18N = {
     "settings.save": "保存",
     "status.copilotOn": "Copilot 已登录",
     "status.copilotOff": "Copilot 未登录",
+    "status.expired": "登录已失效",
+    "status.expiredHint": "GitHub 已拒绝当前登录，通常是该 GitHub 账号在别处重新登录过（GitHub 每个账号只保留一份有效登录）。请重新登录以恢复服务。",
     "status.connected": "已连接",
     "status.disconnected": "未连接",
     "flow.getting": "正在获取登录码…",
@@ -708,6 +714,8 @@ const I18N = {
     "settings.save": "Save",
     "status.copilotOn": "Copilot connected",
     "status.copilotOff": "Copilot signed out",
+    "status.expired": "Sign-in expired",
+    "status.expiredHint": "GitHub rejected the stored sign-in, usually because this GitHub account signed in to Copilot somewhere else -- GitHub keeps only one active sign-in per account. Sign in again to restore service.",
     "status.connected": "Connected",
     "status.disconnected": "Disconnected",
     "flow.getting": "Getting a sign-in code…",
@@ -864,13 +872,22 @@ function initApp() {
 // ---------- Copilot status ----------
 async function refreshStatus() {
   const r = await fetch("/api/status"); const d = await r.json();
+  // Three states, not two. A stored-but-rejected sign-in used to render as
+  // "connected" while every request failed, which is the whole reason the
+  // portal could look healthy during a total outage.
+  const expired = d.logged_in && d.credentials_ok === false;
+  const cls = expired ? "warn" : (d.logged_in ? "on" : "off");
   const b = $("status-badge");
-  b.textContent = d.logged_in ? t("status.copilotOn") : t("status.copilotOff");
-  b.className = "badge " + (d.logged_in ? "on" : "off");
+  b.textContent = expired ? t("status.expired")
+                          : (d.logged_in ? t("status.copilotOn") : t("status.copilotOff"));
+  b.className = "badge " + cls;
+  b.title = expired ? t("status.expiredHint") : "";
   const cs = $("copilot-state");
   if (cs) {
-    cs.textContent = d.logged_in ? t("status.connected") : t("status.disconnected");
-    cs.className = "badge " + (d.logged_in ? "on" : "off");
+    cs.textContent = expired ? t("status.expired")
+                             : (d.logged_in ? t("status.connected") : t("status.disconnected"));
+    cs.className = "badge " + cls;
+    cs.title = expired ? t("status.expiredHint") : "";
   }
 }
 
@@ -1030,7 +1047,16 @@ document.querySelectorAll(".btn-dim").forEach(b => b.onclick = () => {
 // ---------- Models ----------
 $("btn-models").onclick = async () => {
   const r = await api("/api/models");
-  if (!r.ok) { toast(t("models.loadFail"), "err"); return; }
+  if (!r.ok) {
+    // Show the server's reason. It now says "GitHub rejected the stored
+    // sign-in..." for the common case; a bare "failed to load" sent people
+    // hunting through logs for something the response already explained.
+    let why = "";
+    try { why = (await r.json()).detail || ""; } catch {}
+    toast(why || t("models.loadFail"), "err");
+    if (r.status === 503) refreshStatus();
+    return;
+  }
   const d = await r.json();
   $("model-list").innerHTML = d.data.map(m =>
     `<tr><td><code>${m.id}</code></td><td>${m.vendor||""}</td><td>${m.type||""}</td></tr>`

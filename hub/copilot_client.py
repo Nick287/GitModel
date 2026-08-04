@@ -33,12 +33,32 @@ EDITOR_HEADERS: dict[str, str] = {
 }
 
 _api_token_mem: dict[str, Any] = {}
+# Last known verdict on whether GitHub still accepts the stored OAuth token,
+# so the portal can distinguish "a token is stored" from "the token works"
+# without asking GitHub on every status poll.
+_credential_state: dict[str, Any] = {}
 _api_token_lock = asyncio.Lock()
 _http_client: httpx.AsyncClient | None = None
 
 
 class NotAuthenticatedError(RuntimeError):
     """Raised when no Copilot OAuth token is configured."""
+
+
+class CredentialsRejectedError(NotAuthenticatedError):
+    """The stored OAuth token exists but GitHub refuses it.
+
+    Distinct from its parent because the two need different words in front of
+    a user: "log in" versus "your login stopped working". Subclasses it so
+    every existing handler keeps treating this as an auth failure rather than
+    letting it escape as an opaque 500 -- which is what used to happen, since
+    the plain RuntimeError this replaces matched no handler at all.
+
+    GitHub revokes the previous token whenever the same account completes the
+    device flow again for this client_id, so a hub that was working can be
+    logged out by a login somewhere else. That is GitHub's behaviour, not a
+    bug here; the job of this class is to make it legible instead of fatal.
+    """
 
 
 class UpstreamError(RuntimeError):
@@ -96,6 +116,7 @@ def is_authenticated() -> bool:
 def logout() -> None:
     store.clear_oauth_token()
     _api_token_mem.clear()
+    _credential_state.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -134,6 +155,7 @@ async def device_flow_poll(device_code: str) -> dict[str, Any]:
         token = data["access_token"]
         store.set_oauth_token(token)
         _api_token_mem.clear()
+        _credential_state.clear()
         return {"status": "success"}
     err = data.get("error")
     if err in ("authorization_pending", "slow_down"):
@@ -154,11 +176,27 @@ async def _exchange_for_api_token() -> tuple[str, str, float]:
             **EDITOR_HEADERS,
         },
     )
+    if r.status_code in (401, 403):
+        # 401 = the token itself is no longer valid (revoked, most often by
+        # this same account completing the device flow elsewhere). 403 = the
+        # token is fine but the account lacks Copilot access. Different
+        # fixes, so say which one it is instead of listing both as guesses.
+        if r.status_code == 401:
+            detail = (
+                "GitHub rejected the stored login (Bad credentials). It was "
+                "most likely invalidated by signing in to Copilot with this "
+                "same GitHub account somewhere else -- GitHub keeps only one "
+                "active login per account. Log in again to restore service."
+            )
+        else:
+            detail = (
+                "GitHub accepted the login but denied Copilot access. The "
+                "account may not have an active Copilot subscription."
+            )
+        raise CredentialsRejectedError(detail)
     if r.status_code != 200:
         raise RuntimeError(
-            f"Failed to exchange API token {r.status_code}: {r.text}. "
-            "The account may not have a Copilot subscription or the OAuth "
-            "token expired (log out and back in)."
+            f"Failed to exchange API token {r.status_code}: {r.text}."
         )
     data = r.json()
     endpoint = data.get("endpoints", {}).get("api", COPILOT_API_BASE)
@@ -172,9 +210,44 @@ async def get_api_token() -> tuple[str, str]:
     async with _api_token_lock:
         if _api_token_mem and _api_token_mem.get("expires_at", 0) - 300 > time.time():
             return _api_token_mem["token"], _api_token_mem["endpoint"]
-        token, endpoint, expires_at = await _exchange_for_api_token()
+        try:
+            token, endpoint, expires_at = await _exchange_for_api_token()
+        except CredentialsRejectedError:
+            # Drop the cached API token: it was minted from an OAuth token
+            # GitHub no longer honours, so serving it would produce 401s from
+            # the backend instead of one honest error here.
+            _api_token_mem.clear()
+            _credential_state.update(ok=False, checked_at=time.time())
+            raise
         _api_token_mem.update(token=token, endpoint=endpoint, expires_at=expires_at)
+        _credential_state.update(ok=True, checked_at=time.time())
         return token, endpoint
+
+
+async def check_credentials(max_age: float = 300.0) -> bool:
+    """Whether GitHub currently accepts the stored login.
+
+    Unlike :func:`is_authenticated`, which only reports that some string is
+    stored, this reflects whether that string still works -- the distinction
+    that let the portal show "logged in" while every request failed. Result is
+    cached for ``max_age`` seconds so polling the status endpoint does not hit
+    GitHub on every call; a successful token exchange anywhere else refreshes
+    it for free.
+    """
+    if not is_authenticated():
+        return False
+    fresh = time.time() - _credential_state.get("checked_at", 0.0) < max_age
+    if fresh and "ok" in _credential_state:
+        return bool(_credential_state["ok"])
+    try:
+        await get_api_token()
+        return True
+    except NotAuthenticatedError:
+        return False
+    except Exception:
+        # A network blip is not evidence the credentials are bad; report the
+        # last known verdict rather than inventing a logout.
+        return bool(_credential_state.get("ok", True))
 
 
 # --------------------------------------------------------------------------- #

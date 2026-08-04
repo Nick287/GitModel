@@ -31,6 +31,8 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+import httpx
+
 from . import anthropic_adapter as aa
 from . import copilot_client as cc
 from . import image_client as ic
@@ -316,6 +318,15 @@ async def v1_models(request: Request) -> JSONResponse:
         models = await cc.list_models()
     except cc.NotAuthenticatedError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        log.error("list_models failed: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub returned {e.response.status_code} for the model list.",
+        )
+    except RuntimeError as e:
+        log.error("list_models failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
     payload = _openai_models_payload(models)
     if ic.is_configured():
         payload["data"].append(
@@ -778,8 +789,14 @@ async def api_set_settings(
 
 @app.get("/api/status")
 async def api_status() -> dict[str, Any]:
+    # `logged_in` reports only that a token is stored -- keep it, the portal
+    # keys off it. `credentials_ok` reports whether GitHub still accepts that
+    # token, which is the question the portal was really asking: a login
+    # revoked elsewhere left `logged_in` true while every request failed.
+    logged_in = cc.is_authenticated()
     return {
-        "logged_in": cc.is_authenticated(),
+        "logged_in": logged_in,
+        "credentials_ok": await cc.check_credentials() if logged_in else False,
         "require_auth": store.get_require_auth(get_settings().require_auth),
     }
 
@@ -815,7 +832,19 @@ async def api_models(x_admin_token: str | None = Header(default=None)) -> Any:
     try:
         models = await cc.list_models()
     except cc.NotAuthenticatedError as e:
+        # Covers CredentialsRejectedError too -- the case that used to escape
+        # as an opaque 500, leaving the portal with a generic failure toast
+        # and the actual reason only in the server log.
         raise HTTPException(status_code=503, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        log.error("list_models failed: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub returned {e.response.status_code} for the model list.",
+        )
+    except RuntimeError as e:
+        log.error("list_models failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
     chat_models = [
         {
             "id": m.get("id"),
