@@ -12,6 +12,11 @@ actually available. Checks with no suitable model are SKIPped, never failed --
 an account without Claude access is not a broken gateway, and reporting it as
 one hides any real regression in the noise.
 
+Note the asymmetry: /v1/messages is refused upstream for anything but Claude
+("no model endpoints available"), so its checks genuinely cannot run without
+one. count_tokens is a tokenizer call and works on any served model, so it
+runs regardless.
+
 Reads HUB_BASE_URL / HUB_API_KEY from the environment or repo-root .env.
 
 Run:  HUB_BASE_URL=https://<env>.azurecontainerapps.io python scripts/verify_deployed.py
@@ -150,16 +155,22 @@ if not ANTHROPIC:
 print("[1] health + endpoints")
 s, b = hit("/api/status", method="GET")
 check("status logged_in", s == 200 and b"true" in b, b.decode()[:50])
-if ANTHROPIC:
+# count_tokens works on any model the account serves -- it is a tokenizer
+# call, not an inference one, so it does not need Claude the way the rest of
+# /v1/messages does.
+COUNT_MODEL = ANTHROPIC or OPENAI or RESPONSES
+if COUNT_MODEL:
     s, b = hit("/v1/messages/count_tokens",
-               {"model": ANTHROPIC, "messages": [{"role": "user", "content": "hi"}]})
-    check("count_tokens", s == 200, f"{s} {b.decode()[:50]}")
+               {"model": COUNT_MODEL, "messages": [{"role": "user", "content": "hi"}]})
+    check(f"count_tokens ({COUNT_MODEL})", s == 200, f"{s} {b.decode()[:50]}")
+else:
+    skip("count_tokens", "no model available")
+if ANTHROPIC:
     s, b = hit("/v1/chat/completions",
                {"model": ANTHROPIC, "max_tokens": 40,
                 "messages": [{"role": "user", "content": "say OK"}]})
     check("chat/completions", s == 200, str(s))
 else:
-    skip("count_tokens", "no Claude model available")
     skip("chat/completions", "no Claude model available")
 if OPENAI:
     s, b = hit("/v1/chat/completions",
@@ -200,7 +211,7 @@ if ANTHROPIC:
 else:
     for n in ("system + tools + cache_control (stream)", "x-api-key auth",
               "anthropic-beta header"):
-        skip(n, "no Claude model available")
+        skip(n, "/v1/messages accepts only Claude upstream")
 
 print("[3] tool_use")
 if ANTHROPIC:
@@ -221,8 +232,8 @@ if ANTHROPIC:
         check("tool_use block returned", False, str(s))
         check("stop_reason == tool_use", False, str(s))
 else:
-    skip("tool_use block returned", "no Claude model available")
-    skip("stop_reason == tool_use", "no Claude model available")
+    skip("tool_use block returned", "/v1/messages accepts only Claude upstream")
+    skip("stop_reason == tool_use", "/v1/messages accepts only Claude upstream")
 
 print("[4] vision")
 png = base64.b64decode(
@@ -244,7 +255,7 @@ if ANTHROPIC:
     else:
         check("vision reply non-empty", False, str(s))
 else:
-    skip("vision reply non-empty", "no Claude model available")
+    skip("vision reply non-empty", "/v1/messages accepts only Claude upstream")
 
 print("[5] stream reliability under a strict client")
 if ANTHROPIC:
