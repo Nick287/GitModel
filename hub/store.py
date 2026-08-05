@@ -602,6 +602,7 @@ def usage_summary(since: float | None, until: float | None) -> dict[str, Any]:
             f"COALESCE(SUM(u.input_tokens),0) AS input_tokens, "
             f"COALESCE(SUM(u.output_tokens),0) AS output_tokens, "
             f"COALESCE(SUM(u.cached_tokens),0) AS cached_tokens, "
+            f"COALESCE(SUM(u.cache_write_tokens),0) AS cache_write_tokens, "
             f"COALESCE(SUM(u.total_tokens),0) AS total_tokens "
             f"FROM {USAGE_TABLE} u LEFT JOIN api_keys k ON u.api_key = k.key {uclause} "
             f"GROUP BY u.api_key ORDER BY total_tokens DESC",
@@ -685,7 +686,8 @@ def recent_usage(limit: int = 50) -> list[dict[str, Any]]:
     with _conn() as c:
         rows = c.execute(
             "SELECT ts, api_key, model, served_model, endpoint, input_tokens, "
-            "output_tokens, total_tokens, cached_tokens, streamed, estimated, status "
+            "output_tokens, total_tokens, cached_tokens, cache_write_tokens, "
+            "streamed, estimated, status "
             f"FROM {USAGE_TABLE} ORDER BY ts DESC LIMIT ?",
             (limit,),
         ).fetchall()

@@ -12,9 +12,13 @@ env/
 # Hub data (SQLite DB, Copilot token, admin credentials)
 db/
 db-container/
+db-backup/
 *.db
 *.db-wal
 *.db-shm
+# Timestamped backup copies -- `*.db` does not match `hub.db.<stamp>`, and
+# these contain the OAuth token and admin credentials in full.
+hub.db.*
 
 # Claude Code local config
 .claude/

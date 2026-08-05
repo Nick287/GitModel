@@ -338,9 +338,9 @@
         <button class="ghost btn-dim active" data-dim="model" data-i18n="usage.byModel">按模型</button>
         <button class="ghost btn-dim" data-dim="key" data-i18n="usage.byKey">按 API Key</button>
       </div>
-      <table id="tbl-by-model"><thead><tr><th data-i18n="th.model">模型</th><th data-i18n="th.req">请求</th><th data-i18n="th.in">输入</th><th data-i18n="th.cacheHit">缓存命中</th><th data-i18n="th.out">输出</th><th data-i18n="th.total">总计</th><th data-i18n="th.estCost">等价成本</th><th data-i18n="th.quotaReq">配额请求</th></tr></thead>
+      <table id="tbl-by-model"><thead><tr><th data-i18n="th.model">模型</th><th data-i18n="th.req">请求</th><th data-i18n="th.in">输入</th><th data-i18n="th.cacheHit">缓存命中</th><th data-i18n="th.cacheWrite">缓存写</th><th data-i18n="th.out">输出</th><th data-i18n="th.total">总计</th><th data-i18n="th.estCost">等价成本</th><th data-i18n="th.quotaReq">配额请求</th></tr></thead>
         <tbody id="by-model"></tbody></table>
-      <table id="tbl-by-key" style="display:none"><thead><tr><th data-i18n="th.apiKey">API Key</th><th data-i18n="th.req">请求</th><th data-i18n="th.in">输入</th><th data-i18n="th.cacheHit">缓存命中</th><th data-i18n="th.out">输出</th><th data-i18n="th.total">总计</th><th data-i18n="th.estCost">等价成本</th><th data-i18n="th.quotaReq">配额请求</th></tr></thead>
+      <table id="tbl-by-key" style="display:none"><thead><tr><th data-i18n="th.apiKey">API Key</th><th data-i18n="th.req">请求</th><th data-i18n="th.in">输入</th><th data-i18n="th.cacheHit">缓存命中</th><th data-i18n="th.cacheWrite">缓存写</th><th data-i18n="th.out">输出</th><th data-i18n="th.total">总计</th><th data-i18n="th.estCost">等价成本</th><th data-i18n="th.quotaReq">配额请求</th></tr></thead>
         <tbody id="by-key"></tbody></table>
       <p class="muted" style="margin-top:10px" data-i18n-html="usage.note">费用按「设置」页的单价表估算（美元 / 百万 token），缓存命中部分按 <code>cache_read</code> 单价（默认为输入价的 0.1×）折算，仅供参考。</p>
     </div>
@@ -348,7 +348,7 @@
       <h2 data-i18n="usage.recentTitle">最近请求</h2>
       <div class="table-scroll">
         <table><thead><tr>
-          <th data-i18n="th.time">时间</th><th data-i18n="th.model">模型</th><th data-i18n="th.endpoint">端点</th><th data-i18n="th.in">输入</th><th data-i18n="th.cache">缓存</th><th data-i18n="th.out">输出</th>
+          <th data-i18n="th.time">时间</th><th data-i18n="th.model">模型</th><th data-i18n="th.endpoint">端点</th><th data-i18n="th.in">输入</th><th data-i18n="th.cache">缓存读</th><th data-i18n="th.cacheWrite">缓存写</th><th data-i18n="th.out">输出</th>
           <th data-i18n="th.streamed">流式</th><th data-i18n="th.status">状态</th>
         </tr></thead>
         <tbody id="recent-list"></tbody></table>
@@ -522,6 +522,7 @@ const I18N = {
     "th.req": "请求",
     "th.in": "输入",
     "th.cacheHit": "缓存命中",
+    "th.cacheWrite": "缓存写",
     "th.out": "输出",
     "th.total": "总计",
     "th.estCost": "等价成本",
@@ -529,7 +530,7 @@ const I18N = {
     "th.apiKey": "API Key",
     "th.time": "时间",
     "th.endpoint": "端点",
-    "th.cache": "缓存",
+    "th.cache": "缓存读",
     "th.streamed": "流式",
     "th.status": "状态",
     "th.id": "ID",
@@ -673,6 +674,7 @@ const I18N = {
     "th.req": "Requests",
     "th.in": "Input",
     "th.cacheHit": "Cache hits",
+    "th.cacheWrite": "Cache writes",
     "th.out": "Output",
     "th.total": "Total",
     "th.estCost": "Equiv. cost",
@@ -680,7 +682,7 @@ const I18N = {
     "th.apiKey": "API Key",
     "th.time": "Time",
     "th.endpoint": "Endpoint",
-    "th.cache": "Cache",
+    "th.cache": "Cache read",
     "th.streamed": "Stream",
     "th.status": "Status",
     "th.id": "ID",
@@ -993,13 +995,13 @@ async function refreshUsage() {
            `<td>${q ? fmt(q) : '<span class="muted">—</span>'}</td>`;
   };
   $("by-model").innerHTML = d.by_model.map(m =>
-    `<tr><td>${m.model?esc(m.model):t("common.unknown")}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.cached_tokens)}</td><td>${fmt(m.output_tokens)}</td><td>${fmt(m.total_tokens)}</td>${cell(m)}</tr>`
-  ).join("") || `<tr><td colspan="8" class="muted">${t("common.noData")}</td></tr>`;
+    `<tr><td>${m.model?esc(m.model):t("common.unknown")}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.cached_tokens)}</td><td>${fmt(m.cache_write_tokens)}</td><td>${fmt(m.output_tokens)}</td><td>${fmt(m.total_tokens)}</td>${cell(m)}</tr>`
+  ).join("") || `<tr><td colspan="9" class="muted">${t("common.noData")}</td></tr>`;
   $("by-key").innerHTML = (d.by_api_key || []).map(k => {
     const label = k.key_name ? esc(k.key_name)
       : (k.key ? `<span class="muted">…${esc(String(k.key).slice(-6))}</span>` : `<span class="muted">${t("common.anon")}</span>`);
-    return `<tr><td>${label}</td><td>${fmt(k.requests)}</td><td>${fmt(k.input_tokens)}</td><td>${fmt(k.cached_tokens)}</td><td>${fmt(k.output_tokens)}</td><td>${fmt(k.total_tokens)}</td>${cell(k)}</tr>`;
-  }).join("") || `<tr><td colspan="8" class="muted">${t("common.noData")}</td></tr>`;
+    return `<tr><td>${label}</td><td>${fmt(k.requests)}</td><td>${fmt(k.input_tokens)}</td><td>${fmt(k.cached_tokens)}</td><td>${fmt(k.cache_write_tokens)}</td><td>${fmt(k.output_tokens)}</td><td>${fmt(k.total_tokens)}</td>${cell(k)}</tr>`;
+  }).join("") || `<tr><td colspan="9" class="muted">${t("common.noData")}</td></tr>`;
   refreshRecent();
 }
 
@@ -1013,11 +1015,16 @@ async function refreshRecent() {
     const stTag = x.status === 200 ? `<span class="tag tag-ok">${x.status}</span>`
       : `<span class="tag tag-err">${x.status}</span>`;
     const inCell = x.estimated ? `${fmt(x.input_tokens)} <span class="tag tag-est">${t("tag.est")}</span>` : fmt(x.input_tokens);
+    // Cache reads and cache writes are separate billable quantities, and both
+    // have to be visible: with prompt caching the whole context lands in one
+    // of these two columns, leaving input_tokens at ~2. Showing only reads
+    // made a 195k-token cache write look like a request that cost nothing.
     const cacheCell = x.cached_tokens ? fmt(x.cached_tokens) : `<span class="muted">—</span>`;
+    const writeCell = x.cache_write_tokens ? fmt(x.cache_write_tokens) : `<span class="muted">—</span>`;
     return `<tr><td>${time}</td><td>${shortModel(x.model)}</td><td>${esc(x.endpoint)}</td>
-      <td>${inCell}</td><td>${cacheCell}</td><td>${fmt(x.output_tokens)}</td>
+      <td>${inCell}</td><td>${cacheCell}</td><td>${writeCell}</td><td>${fmt(x.output_tokens)}</td>
       <td>${x.streamed ? "✓" : ""}</td><td>${stTag}</td></tr>`;
-  }).join("") || `<tr><td colspan="8" class="muted">${t("common.noRecord")}</td></tr>`;
+  }).join("") || `<tr><td colspan="9" class="muted">${t("common.noRecord")}</td></tr>`;
 }
 $("btn-refresh-usage").onclick = refreshUsage;
 
