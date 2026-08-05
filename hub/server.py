@@ -601,12 +601,17 @@ async def v1_messages(request: Request) -> Any:
         u = data.get("usage") or {}
         i = u.get("input_tokens", 0)
         o = u.get("output_tokens", 0)
+        cached = u.get("cache_read_input_tokens", 0)
+        cache_write = u.get("cache_creation_input_tokens", 0)
         nano, counts = _copilot_usage(data)
+        # Anthropic's input_tokens excludes both cache buckets, so i + o would
+        # count almost nothing once prompt caching is on -- the context lives
+        # in cache_read/cache_write. Summing all four matches what the OpenAI
+        # path already stores in `total`, whose upstream figure is inclusive.
         _record(client_key=client_key, model=model, served=data.get("model"),
-                endpoint="messages", usage3=(i, o, i + o),
+                endpoint="messages", usage3=(i, o, i + cached + cache_write + o),
                 streamed=False, estimated=False,
-                cached=u.get("cache_read_input_tokens", 0),
-                cache_write=u.get("cache_creation_input_tokens", 0),
+                cached=cached, cache_write=cache_write,
                 nano_aiu=nano)
         return JSONResponse(data)
 
@@ -688,7 +693,8 @@ async def v1_messages(request: Request) -> Any:
             cached = counts.get("cache_read") or cached
             cache_write = counts.get("cache_write") or cache_write
             _record(client_key=client_key, model=model, served=None,
-                    endpoint="messages", usage3=(i, o, i + o),
+                    endpoint="messages",
+                    usage3=(i, o, i + cached + cache_write + o),
                     streamed=True, estimated=not (i or nano),
                     cached=cached, cache_write=cache_write, nano_aiu=nano)
 

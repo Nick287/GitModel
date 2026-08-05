@@ -377,20 +377,30 @@ def estimate_cost(
 ) -> float:
     """USD cost for a row given the pricing table (per 1M tokens).
 
-    ``cached_tokens`` are a subset of ``input_tokens`` that hit the prompt
-    cache; they are billed at the (cheaper) ``cache_read`` rate, and the
-    remaining uncached input at the normal ``input`` rate.
+    ``cached_tokens`` are billed at the (cheaper) ``cache_read`` rate. Whether
+    they also count inside ``input_tokens`` depends on which upstream shape
+    produced the row: OpenAI reports cache hits as a subset of prompt tokens,
+    Anthropic reports them as a bucket of their own with ``input_tokens``
+    holding only what missed the cache. The row itself does not say which, but
+    a count larger than ``input_tokens`` cannot be a subset of it, so that case
+    is treated as separate buckets. Ambiguous rows (cached <= input) keep the
+    subset reading, which is right for OpenAI and understates an Anthropic row
+    only when its cache hits were already small.
 
-    ``cache_write_tokens`` are NOT part of ``input_tokens`` (the upstream
-    reports cache writes as a separate bucket) and are billed at the
-    ``cache_write`` rate, defaulting to 1.25x input per Anthropic pricing.
+    ``cache_write_tokens`` are never part of ``input_tokens`` on either shape
+    and are billed at the ``cache_write`` rate, defaulting to 1.25x input per
+    Anthropic pricing.
     """
     rates = pricing.get(model or "") or pricing.get("default") or {}
     in_rate = rates.get("input", 0)
     cache_rate = rates.get("cache_read", in_rate * 0.1)
     write_rate = rates.get("cache_write", in_rate * 1.25)
-    cached = max(0, min(cached_tokens or 0, input_tokens or 0))
-    uncached = (input_tokens or 0) - cached
+    if (cached_tokens or 0) > (input_tokens or 0):
+        cached = cached_tokens or 0
+        uncached = input_tokens or 0
+    else:
+        cached = max(0, cached_tokens or 0)
+        uncached = (input_tokens or 0) - cached
     cost_in = (uncached / 1_000_000) * in_rate
     cost_cache = (cached / 1_000_000) * cache_rate
     cost_write = ((cache_write_tokens or 0) / 1_000_000) * write_rate
