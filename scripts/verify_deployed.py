@@ -1,10 +1,16 @@
-"""End-to-end verification against a deployed hub (dev02), over real HTTPS.
+"""End-to-end verification against a deployed hub, over real HTTPS.
 
 Unlike scripts/test_passthrough.py -- which drives the app in-process -- this
 talks to the deployed URL with a *strict* HTTP client. That distinction matters:
 curl silently tolerates a truncated chunked body, so a broken stream looks fine
 through curl while Claude Code (Node undici) and Python's http.client reject it.
 Reading responses with urllib here is what surfaces that class of bug.
+
+Which models a hub serves depends on the Copilot account behind it, so the
+suite asks /v1/models first and runs each check against a model that is
+actually available. Checks with no suitable model are SKIPped, never failed --
+an account without Claude access is not a broken gateway, and reporting it as
+one hides any real regression in the noise.
 
 Reads HUB_BASE_URL / HUB_API_KEY from the environment or repo-root .env.
 
@@ -45,12 +51,25 @@ if not URL or not KEY:
 
 PASSED: list[str] = []
 FAILED: list[str] = []
+SKIPPED: list[str] = []
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
     verdict = "PASS" if cond else "FAIL"
     (PASSED if cond else FAILED).append(name)
     print(f"  {verdict}  {name}" + (f"  -- {detail}" if detail else ""))
+
+
+def skip(name: str, why: str) -> None:
+    """Record a check the deployment cannot run, distinct from a failure.
+
+    Which models a hub serves depends on the Copilot account behind it, and
+    that changes without the code changing. Calling an absent model a failure
+    reports a broken gateway when the gateway is fine, and buries any real
+    regression among the noise.
+    """
+    SKIPPED.append(name)
+    print(f"  SKIP  {name}  -- {why}")
 
 
 def hit(path, body=None, method="POST", hdr=None, auth="bearer"):
@@ -93,92 +112,171 @@ def sse_text(raw: bytes) -> str:
     return out
 
 
+print("[0] model discovery")
+_s, _b = hit("/v1/models", method="GET")
+if _s == 200:
+    try:
+        MODELS = [m.get("id") for m in json.loads(_b).get("data", []) if m.get("id")]
+    except (json.JSONDecodeError, AttributeError):
+        MODELS = []
+else:
+    MODELS = []
+check("/v1/models", _s == 200 and bool(MODELS), f"{_s}, {len(MODELS)} models")
+
+
+def pick(*candidates: str) -> str | None:
+    """First candidate this deployment actually serves, or None."""
+    for c in candidates:
+        if c in MODELS:
+            return c
+    return None
+
+
+# The Anthropic-shaped tests need a Claude model; the Responses test needs a
+# GPT one. Both lists are preference-ordered, so a hub missing the newest
+# still runs the suite on whatever it does have.
+ANTHROPIC = pick("claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+                 "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4.5")
+RESPONSES = pick("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+                 "gpt-5.4", "gpt-4.1", "gpt-4o")
+OPENAI = pick("gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-3.5-turbo")
+print(f"  using anthropic={ANTHROPIC}  responses={RESPONSES}  openai={OPENAI}")
+if not ANTHROPIC:
+    claude = [m for m in MODELS if "claude" in m]
+    print(f"  note: this account serves no Claude model "
+          f"({len(MODELS)} models, claude={claude or 'none'}); "
+          f"Anthropic-shaped checks will be skipped, not failed")
+
 print("[1] health + endpoints")
 s, b = hit("/api/status", method="GET")
 check("status logged_in", s == 200 and b"true" in b, b.decode()[:50])
-s, b = hit("/v1/messages/count_tokens",
-           {"model": "claude-opus-5", "messages": [{"role": "user", "content": "hi"}]})
-check("count_tokens", s == 200, f"{s} {b.decode()[:50]}")
-s, b = hit("/v1/chat/completions",
-           {"model": "claude-opus-5", "max_tokens": 40,
-            "messages": [{"role": "user", "content": "say OK"}]})
-check("chat/completions", s == 200, str(s))
-s, b = hit("/v1/responses",
-           {"model": "gpt-5.6-sol", "max_output_tokens": 2000, "input": "say OK"})
-check("responses (gpt-5.6-sol)", s == 200, str(s))
+if ANTHROPIC:
+    s, b = hit("/v1/messages/count_tokens",
+               {"model": ANTHROPIC, "messages": [{"role": "user", "content": "hi"}]})
+    check("count_tokens", s == 200, f"{s} {b.decode()[:50]}")
+    s, b = hit("/v1/chat/completions",
+               {"model": ANTHROPIC, "max_tokens": 40,
+                "messages": [{"role": "user", "content": "say OK"}]})
+    check("chat/completions", s == 200, str(s))
+else:
+    skip("count_tokens", "no Claude model available")
+    skip("chat/completions", "no Claude model available")
+if OPENAI:
+    s, b = hit("/v1/chat/completions",
+               {"model": OPENAI, "max_tokens": 40,
+                "messages": [{"role": "user", "content": "say OK"}]})
+    check(f"chat/completions ({OPENAI})", s == 200, str(s))
+else:
+    skip("chat/completions (openai)", "no GPT model available")
+if RESPONSES:
+    s, b = hit("/v1/responses",
+               {"model": RESPONSES, "max_output_tokens": 2000, "input": "say OK"})
+    check(f"responses ({RESPONSES})", s == 200, str(s))
+else:
+    skip("responses", "no GPT model available")
 
 print("[2] Claude Code request shapes")
-s, b = hit("/v1/messages", {
-    "model": "claude-opus-5", "max_tokens": 1024, "stream": True,
-    "system": [{"type": "text", "text": "You are Claude Code.",
-                "cache_control": {"type": "ephemeral"}}],
-    "tools": [{"name": "Bash", "description": "Run a command",
-               "input_schema": {"type": "object",
-                                "properties": {"command": {"type": "string"}},
-                                "required": ["command"]}}],
-    "messages": [{"role": "user", "content": "List files"}]})
-check("system + tools + cache_control (stream)", s == 200 and len(b) > 0, str(s))
-s, b = hit("/v1/messages",
-           {"model": "claude-opus-5", "max_tokens": 32, "stream": True,
-            "messages": [{"role": "user", "content": "hi"}]}, auth="apikey")
-check("x-api-key auth", s == 200 and len(b) > 0, str(s))
-s, b = hit("/v1/messages",
-           {"model": "claude-opus-5", "max_tokens": 32, "stream": True,
-            "messages": [{"role": "user", "content": "hi"}]},
-           hdr={"anthropic-beta": "claude-code-20250219,"
-                                  "fine-grained-tool-streaming-2025-05-14"})
-check("anthropic-beta header", s == 200 and len(b) > 0, str(s))
+if ANTHROPIC:
+    s, b = hit("/v1/messages", {
+        "model": ANTHROPIC, "max_tokens": 1024, "stream": True,
+        "system": [{"type": "text", "text": "You are Claude Code.",
+                    "cache_control": {"type": "ephemeral"}}],
+        "tools": [{"name": "Bash", "description": "Run a command",
+                   "input_schema": {"type": "object",
+                                    "properties": {"command": {"type": "string"}},
+                                    "required": ["command"]}}],
+        "messages": [{"role": "user", "content": "List files"}]})
+    check("system + tools + cache_control (stream)", s == 200 and len(b) > 0, str(s))
+    s, b = hit("/v1/messages",
+               {"model": ANTHROPIC, "max_tokens": 32, "stream": True,
+                "messages": [{"role": "user", "content": "hi"}]}, auth="apikey")
+    check("x-api-key auth", s == 200 and len(b) > 0, str(s))
+    s, b = hit("/v1/messages",
+               {"model": ANTHROPIC, "max_tokens": 32, "stream": True,
+                "messages": [{"role": "user", "content": "hi"}]},
+               hdr={"anthropic-beta": "claude-code-20250219,"
+                                      "fine-grained-tool-streaming-2025-05-14"})
+    check("anthropic-beta header", s == 200 and len(b) > 0, str(s))
+else:
+    for n in ("system + tools + cache_control (stream)", "x-api-key auth",
+              "anthropic-beta header"):
+        skip(n, "no Claude model available")
 
 print("[3] tool_use")
-s, b = hit("/v1/messages", {
-    "model": "claude-opus-5", "max_tokens": 200,
-    "tools": [{"name": "get_weather", "description": "Weather for a city",
-               "input_schema": {"type": "object",
-                                "properties": {"city": {"type": "string"}},
-                                "required": ["city"]}}],
-    "messages": [{"role": "user", "content": "Weather in Paris? Use the tool."}]})
-if s == 200:
-    d = json.loads(b)
-    tu = [x for x in d.get("content", []) if x.get("type") == "tool_use"]
-    check("tool_use block returned", bool(tu), tu[0].get("name") if tu else "none")
-    check("stop_reason == tool_use", d.get("stop_reason") == "tool_use",
-          str(d.get("stop_reason")))
+if ANTHROPIC:
+    s, b = hit("/v1/messages", {
+        "model": ANTHROPIC, "max_tokens": 200,
+        "tools": [{"name": "get_weather", "description": "Weather for a city",
+                   "input_schema": {"type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                    "required": ["city"]}}],
+        "messages": [{"role": "user", "content": "Weather in Paris? Use the tool."}]})
+    if s == 200:
+        d = json.loads(b)
+        tu = [x for x in d.get("content", []) if x.get("type") == "tool_use"]
+        check("tool_use block returned", bool(tu), tu[0].get("name") if tu else "none")
+        check("stop_reason == tool_use", d.get("stop_reason") == "tool_use",
+              str(d.get("stop_reason")))
+    else:
+        check("tool_use block returned", False, str(s))
+        check("stop_reason == tool_use", False, str(s))
 else:
-    check("tool_use block returned", False, str(s))
-    check("stop_reason == tool_use", False, str(s))
+    skip("tool_use block returned", "no Claude model available")
+    skip("stop_reason == tool_use", "no Claude model available")
 
 print("[4] vision")
 png = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
     "hQGAhKmMIQAAAABJRU5ErkJggg=="
 )
-s, b = hit("/v1/messages", {
-    "model": "claude-opus-5", "max_tokens": 100,
-    "messages": [{"role": "user", "content": [
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                     "data": base64.b64encode(png).decode()}},
-        {"type": "text", "text": "Describe this image in 5 words."}]}]})
-if s == 200:
-    d = json.loads(b)
-    txt = " ".join(x.get("text", "") for x in d.get("content", [])
-                   if x.get("type") == "text")
-    check("vision reply non-empty", bool(txt.strip()), repr(txt[:60]))
+if ANTHROPIC:
+    s, b = hit("/v1/messages", {
+        "model": ANTHROPIC, "max_tokens": 100,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": base64.b64encode(png).decode()}},
+            {"type": "text", "text": "Describe this image in 5 words."}]}]})
+    if s == 200:
+        d = json.loads(b)
+        txt = " ".join(x.get("text", "") for x in d.get("content", [])
+                       if x.get("type") == "text")
+        check("vision reply non-empty", bool(txt.strip()), repr(txt[:60]))
+    else:
+        check("vision reply non-empty", False, str(s))
 else:
-    check("vision reply non-empty", False, str(s))
+    skip("vision reply non-empty", "no Claude model available")
 
 print("[5] stream reliability under a strict client")
-bad = 0
-last = ""
-for _ in range(5):
-    s, b = hit("/v1/messages",
-               {"model": "claude-opus-5", "max_tokens": 32, "stream": True,
-                "messages": [{"role": "user", "content": "Count to three."}]})
-    if s != 200 or not b:
-        bad += 1
-    else:
-        last = sse_text(b)
-check("5/5 streams read completely", bad == 0, f"{5 - bad}/5 ok, text={last[:30]!r}")
+if ANTHROPIC:
+    bad = 0
+    last = ""
+    for _ in range(5):
+        s, b = hit("/v1/messages",
+                   {"model": ANTHROPIC, "max_tokens": 32, "stream": True,
+                    "messages": [{"role": "user", "content": "Count to three."}]})
+        if s != 200 or not b:
+            bad += 1
+        else:
+            last = sse_text(b)
+    check("5/5 streams read completely", bad == 0, f"{5 - bad}/5 ok, text={last[:30]!r}")
+elif OPENAI:
+    # The truncated-stream bug this guards is in the shared streaming path,
+    # not in any one model, so a GPT model still exercises it.
+    bad = 0
+    for _ in range(5):
+        s, b = hit("/v1/chat/completions",
+                   {"model": OPENAI, "max_tokens": 32, "stream": True,
+                    "messages": [{"role": "user", "content": "Count to three."}]})
+        if s != 200 or not b:
+            bad += 1
+    check(f"5/5 streams read completely ({OPENAI})", bad == 0, f"{5 - bad}/5 ok")
+else:
+    skip("5/5 streams read completely", "no usable model available")
 
-print(f"\n{'=' * 56}\nPASSED {len(PASSED)}   FAILED {len(FAILED)}")
+print(f"\n{'=' * 56}")
+print(f"PASSED {len(PASSED)}   FAILED {len(FAILED)}   SKIPPED {len(SKIPPED)}")
 for f in FAILED:
-    print("  -", f)
+    print("  FAIL -", f)
+for sk in SKIPPED:
+    print("  skip -", sk)
+raise SystemExit(1 if FAILED else 0)
