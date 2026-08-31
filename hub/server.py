@@ -541,13 +541,16 @@ async def v1_messages_count_tokens(request: Request) -> Any:
     if mapped != body.get("model"):
         body = {**body, "model": mapped}
     beta_in = request.headers.get("anthropic-beta")
-    body, _ = aa.strip_unsupported(body, beta_in)
-    beta_out = aa.forwardable_betas(beta_in)
+    body_original = body
+    body, headers = _prepare_upstream(body, beta_in)
     try:
-        status, data = await cc.post_json(
-            "/v1/messages/count_tokens", body,
-            {"anthropic-beta": beta_out} if beta_out else None,
-        )
+        status, data = await cc.post_json("/v1/messages/count_tokens", body, headers)
+        if status != 200:
+            retry = _beta_retry(body_original, beta_in, json.dumps(data))
+            if retry:
+                body, headers = retry
+                status, data = await cc.post_json(
+                    "/v1/messages/count_tokens", body, headers)
     except cc.NotAuthenticatedError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except RuntimeError as e:
@@ -556,6 +559,49 @@ async def v1_messages_count_tokens(request: Request) -> Any:
         # so a client sees "Bad credentials" instead of Internal Server Error.
         raise HTTPException(status_code=502, detail=str(e))
     return JSONResponse(data, status_code=status)
+
+
+def _beta_retry(
+    req_original: dict[str, Any], beta_in: str | None, upstream_error: str,
+) -> tuple[dict[str, Any], dict[str, str] | None] | None:
+    """Payload and headers to retry with after a beta refusal, or None.
+
+    The upstream names the betas it will not take, so a refusal is a fact to
+    record rather than a guess to make. Returns None unless this particular
+    error named at least one beta we had not already learned -- which keeps an
+    ordinary 400 (bad model, oversized request) from triggering a pointless
+    second attempt, and stops a repeat refusal from looping.
+
+    Rebuilding the payload matters as much as the header: if the refused beta
+    was the one gating a field, that field has to come out too, or the retry
+    fails exactly as the first attempt did.
+    """
+    if not aa.learn_refused_betas(upstream_error):
+        return None
+    log.info("upstream refused beta(s); retrying without: %s",
+             ", ".join(sorted(aa.refused_betas())))
+    return _prepare_upstream(req_original, beta_in)
+
+
+def _prepare_upstream(
+    req: dict[str, Any], beta_in: str | None,
+) -> tuple[dict[str, Any], dict[str, str] | None]:
+    """Body and headers to send upstream for an Anthropic-shaped request.
+
+    Field stripping keys off the header we will actually send, not the one the
+    caller sent: a beta we have learned is refused gets filtered out, and any
+    field it gates has to go with it or the request is rejected anyway.
+    """
+    beta_out = aa.forwardable_betas(beta_in)
+    body, dropped = aa.strip_unsupported(req, beta_out)
+    if dropped:
+        log.info("dropped unsupported fields for upstream: %s", ", ".join(dropped))
+    headers: dict[str, str] = {}
+    if beta_out:
+        headers["anthropic-beta"] = beta_out
+    if aa.has_image_content_anthropic(body):
+        headers["Copilot-Vision-Request"] = "true"
+    return body, (headers or None)
 
 
 @app.post("/v1/messages")
@@ -579,31 +625,21 @@ async def v1_messages(request: Request) -> Any:
     if mapped != model:
         req = {**req, "model": mapped}
 
-    # Passthrough forwards the body verbatim, which means fields the Anthropic
-    # API accepts but Copilot does not reach the upstream and get the whole
-    # request rejected. Some are refused outright; context_management is only
-    # refused when its beta header is missing, so the caller's header decides.
+    # Passthrough forwards the body verbatim, so fields and betas the backend
+    # will not take have to be filtered here or they fail the whole request.
     beta_in = request.headers.get("anthropic-beta")
-    req, dropped = aa.strip_unsupported(req, beta_in)
-    if dropped:
-        log.info("dropped unsupported fields for upstream: %s", ", ".join(dropped))
-
-    # Forward the betas upstream verifiably accepts and drop the rest: the
-    # header is validated all-or-nothing, so passing an unknown one through
-    # would fail the request instead of just losing that feature. Discarding
-    # the header wholesale was the old behaviour, and it silently disabled
-    # every beta -- context-1m and effort included.
-    beta_out = aa.forwardable_betas(beta_in)
-    upstream_headers: dict[str, str] = {}
-    if beta_out:
-        upstream_headers["anthropic-beta"] = beta_out
-    if aa.has_image_content_anthropic(req):
-        upstream_headers["Copilot-Vision-Request"] = "true"
-    vision_headers = upstream_headers or None
+    req_original = req
+    req, vision_headers = _prepare_upstream(req, beta_in)
 
     if not stream:
         try:
             status, data = await cc.post_json("/v1/messages", req, vision_headers)
+            if status != 200:
+                retry = _beta_retry(req_original, beta_in, json.dumps(data))
+                if retry:
+                    req, vision_headers = retry
+                    status, data = await cc.post_json(
+                        "/v1/messages", req, vision_headers)
         except cc.NotAuthenticatedError as e:
             raise HTTPException(status_code=503, detail=str(e))
         if status != 200:
@@ -639,20 +675,34 @@ async def v1_messages(request: Request) -> Any:
     except cc.NotAuthenticatedError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except cc.UpstreamError as e:
-        # Log the upstream's own message (model not supported, payload
-        # rejected, quota, ...) -- it is the only clue to why a request
-        # failed, and it would otherwise appear nowhere in the server log.
-        # Include the model so a failure specific to one model is visible
-        # without reproducing it. Then hand the client the upstream status
-        # and body verbatim, exactly as the non-streaming branch does: a 400
-        # for an unsupported parameter has to reach the caller as a 400, or
-        # the only actionable part of the answer is lost.
-        log.error("upstream stream failed model=%s: %s", req.get("model"), e)
-        status = _passthrough_status(e.status_code)
-        _record(client_key=client_key, model=model, served=None,
-                endpoint="messages", usage3=(0, 0, 0), streamed=True,
-                estimated=False, status=status)
-        return JSONResponse(e.body, status_code=status)
+        # A refused beta is recoverable and worth one more attempt: the
+        # upstream said which ones, so the retry is a corrected request rather
+        # than a repeat. Any other failure falls through to be reported.
+        retry = _beta_retry(req_original, beta_in, e.raw)
+        if retry:
+            req, vision_headers = retry
+            try:
+                chunks, _ = await cc.open_stream("/v1/messages", req, vision_headers)
+            except cc.UpstreamError as e2:
+                e = e2
+                retry = None
+            except cc.NotAuthenticatedError as e2:
+                raise HTTPException(status_code=503, detail=str(e2))
+        if not retry:
+            # Log the upstream's own message (model not supported, payload
+            # rejected, quota, ...) -- it is the only clue to why a request
+            # failed, and it would otherwise appear nowhere in the server log.
+            # Include the model so a failure specific to one model is visible
+            # without reproducing it. Then hand the client the upstream status
+            # and body verbatim, exactly as the non-streaming branch does: a
+            # 400 for an unsupported parameter has to reach the caller as a
+            # 400, or the only actionable part of the answer is lost.
+            log.error("upstream stream failed model=%s: %s", req.get("model"), e)
+            status = _passthrough_status(e.status_code)
+            _record(client_key=client_key, model=model, served=None,
+                    endpoint="messages", usage3=(0, 0, 0), streamed=True,
+                    estimated=False, status=status)
+            return JSONResponse(e.body, status_code=status)
     except RuntimeError as e:
         # Not the upstream's verdict -- a token exchange or transport failure
         # on our side, which is what 502 actually describes.

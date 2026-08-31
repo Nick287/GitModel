@@ -142,18 +142,18 @@ BETA_GATED_FIELDS: dict[str, str] = {
 # reading the reply -- not by reading Anthropic's docs, since the backend
 # serves its own subset.
 #
-# An allowlist rather than a blocklist because the header is validated
-# ALL-OR-NOTHING: one unrecognised entry fails the entire request. Measured:
-# these nine sent together answer 200, and adding a single refused beta to them
-# turns the same request into a 400. Dropping an unknown beta costs that one
-# feature; forwarding it costs the request.
+# This is a seed, not a gate. Betas outside it are still forwarded (see
+# forwardable_betas); the list exists so the common ones never pay the cost of
+# being learned, and so a refusal reported for one of them is treated as a
+# fluke rather than a lesson -- these were measured, and one bad response
+# should not disable a feature that works.
 #
-# Known refused: advisor-tool-2026-03-01, code-execution-2025-08-25,
-# skills-2025-10-02.
+# Measured: these nine sent together answer 200; adding a refused beta to them
+# turns the same request into a 400, because the header is validated
+# ALL-OR-NOTHING. Known refused at the time of measuring:
+# advisor-tool-2026-03-01, code-execution-2025-08-25, skills-2025-10-02.
 #
-# To add an entry, send it upstream on a throwaway request first --
-# scripts/probe_upstream_betas.py does exactly that. 200 means add it;
-# "unsupported beta header(s): X" means leave it out.
+# scripts/probe_upstream_betas.py re-runs the measurement.
 FORWARDABLE_BETAS: frozenset[str] = frozenset({
     "claude-code-20250219",
     "context-1m-2025-08-07",
@@ -165,6 +165,25 @@ FORWARDABLE_BETAS: frozenset[str] = frozenset({
     "prompt-caching-scope-2026-01-05",
     "thinking-token-count-2026-05-13",
 })
+
+# Betas this process has watched the upstream refuse, learned at runtime from
+# its own error messages rather than configured ahead of time.
+#
+# The allowlist above cannot be complete: it was measured on one account, and
+# Anthropic adds betas without asking us. A beta missing from it is silently
+# dropped, which is exactly how context_management went unnoticed for months.
+# So unknown betas are forwarded optimistically and the refusal, if it comes,
+# is recorded here -- the upstream names the offending betas exactly, so this
+# is read from the response, never guessed.
+#
+# Process-local and unbounded only by how many distinct betas a client sends,
+# which is a handful. Lost on restart, which just means relearning once.
+_REFUSED_BETAS: set[str] = set()
+
+# The upstream's wording for this, e.g.
+#   "unsupported beta header(s): advisor-tool-2026-03-01"
+#   "unsupported beta header(s): code-execution-2025-08-25, skills-2025-10-02"
+_UNSUPPORTED_BETA_MARKER = "unsupported beta header(s):"
 
 
 def _betas(header: str | None) -> set[str]:
@@ -178,13 +197,55 @@ def _betas(header: str | None) -> set[str]:
     return {part.strip() for part in header.split(",") if part.strip()}
 
 
-def forwardable_betas(header: str | None) -> str | None:
-    """The caller's betas that upstream accepts, as a header value or None.
+def parse_refused_betas(upstream_error: str) -> set[str]:
+    """Betas the upstream names as unsupported in an error body, if any.
 
-    Everything unverified is dropped rather than passed along, since a single
-    unknown entry would fail the whole request.
+    Returns an empty set for any other failure, so a 400 about something else
+    -- or a 500, or a truncated body -- never teaches us anything false.
     """
-    keep = _betas(header) & FORWARDABLE_BETAS
+    if not upstream_error or _UNSUPPORTED_BETA_MARKER not in upstream_error:
+        return set()
+    tail = upstream_error.split(_UNSUPPORTED_BETA_MARKER, 1)[1]
+    # The list ends at the first character that cannot be part of one:
+    # a quote, brace or newline, depending on how the body was serialised.
+    for stop in ('"', "'", "}", "\n", "\\"):
+        tail = tail.split(stop, 1)[0]
+    return {p.strip() for p in tail.split(",") if p.strip()}
+
+
+def learn_refused_betas(upstream_error: str) -> set[str]:
+    """Record what the upstream refused; return the newly learned betas.
+
+    Only entries the upstream actually named are stored, and only ones not
+    already known, so a caller can log a genuine discovery without repeating
+    itself on every subsequent request.
+    """
+    refused = parse_refused_betas(upstream_error)
+    new = refused - _REFUSED_BETAS - FORWARDABLE_BETAS
+    _REFUSED_BETAS.update(refused - FORWARDABLE_BETAS)
+    return new
+
+
+def refused_betas() -> frozenset[str]:
+    """What this process has learned so far. Exposed for tests and diagnostics."""
+    return frozenset(_REFUSED_BETAS)
+
+
+def reset_learned_betas() -> None:
+    """Forget the learned refusals. For tests."""
+    _REFUSED_BETAS.clear()
+
+
+def forwardable_betas(header: str | None) -> str | None:
+    """The caller's betas worth sending upstream, as a header value or None.
+
+    Everything known-good is forwarded, and so is anything unrecognised --
+    optimistically, since the alternative is dropping a feature the backend may
+    well support and never finding out. What has been seen refused is withheld,
+    because the header is validated all-or-nothing and one bad entry fails the
+    whole request.
+    """
+    keep = _betas(header) - _REFUSED_BETAS
     return ",".join(sorted(keep)) if keep else None
 
 
