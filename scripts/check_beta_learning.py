@@ -116,6 +116,23 @@ aa._REFUSED_BETAS[NEW] = time.time() - aa._REFUSAL_TTL - 1
 check("only the stale one returns", aa.forwardable_betas(f"{NEW},{OTHER}"), NEW)
 
 aa.reset_learned_betas()
+
+
+
+
+print("[10] the header divergence is observable")
+aa.reset_learned_betas()
+hdr = f"claude-code-20250219,{NEW}"
+check("nothing withheld before a refusal", aa.withheld_betas(hdr), frozenset())
+aa.learn_refused_betas("unsupported beta header(s): " + NEW)
+check("the withheld beta is reported", aa.withheld_betas(hdr), frozenset({NEW}))
+check("and the rest still forwarded", aa.forwardable_betas(hdr), "claude-code-20250219")
+aa._REFUSED_BETAS[NEW] = time.time() - aa._REFUSAL_TTL - 1
+check("expired refusal reports nothing withheld", aa.withheld_betas(hdr), frozenset())
+check("a header we never received withholds nothing",
+      aa.withheld_betas(None), frozenset())
+
+aa.reset_learned_betas()
 print()
 print("PASSED" if not failures else f"FAILED: {failures}")
 raise SystemExit(1 if failures else 0)

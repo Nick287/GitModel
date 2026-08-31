@@ -260,6 +260,17 @@ def forwardable_betas(header: str | None) -> str | None:
     return ",".join(sorted(keep)) if keep else None
 
 
+def withheld_betas(header: str | None) -> frozenset[str]:
+    """The caller's betas this request will not forward.
+
+    Non-empty only when a refusal learned earlier is still in force, so a
+    caller can log the divergence between what arrived and what goes out --
+    which is otherwise invisible, and is the difference between a feature
+    being off because the backend refused it and being off for no reason.
+    """
+    return frozenset(_betas(header) & refused_betas())
+
+
 def strip_unsupported(
     payload: dict[str, Any], beta_header: str | None = None
 ) -> tuple[dict[str, Any], list[str]]:

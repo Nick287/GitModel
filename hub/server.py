@@ -596,6 +596,15 @@ def _prepare_upstream(
     body, dropped = aa.strip_unsupported(req, beta_out)
     if dropped:
         log.info("dropped unsupported fields for upstream: %s", ", ".join(dropped))
+    # Log the header only when it changes on the way through. Echoing an
+    # unmodified header on every request would bury the one case worth seeing
+    # -- a beta the caller asked for that we are holding back -- and leave no
+    # way to tell "the backend refused this" from "the feature is off and
+    # nobody knows why".
+    withheld = aa.withheld_betas(beta_in)
+    if withheld:
+        log.info("anthropic-beta in=%r -> out=%r (withholding refused: %s)",
+                 beta_in, beta_out, ", ".join(sorted(withheld)))
     headers: dict[str, str] = {}
     if beta_out:
         headers["anthropic-beta"] = beta_out
@@ -867,6 +876,25 @@ async def api_status() -> dict[str, Any]:
         "logged_in": logged_in,
         "credentials_ok": await cc.check_credentials() if logged_in else False,
         "require_auth": store.get_require_auth(get_settings().require_auth),
+    }
+
+
+@app.get("/api/betas")
+async def api_betas(x_admin_token: str | None = Header(default=None)) -> dict[str, Any]:
+    """What this replica currently forwards, withholds, and has learned.
+
+    The learned refusals are process state, so a log line shows only the moment
+    one was recorded -- not what is in force now. Without somewhere to read it,
+    a feature being off is indistinguishable from a feature nobody asked for.
+    Read-only, and admin-gated because it describes internal behaviour.
+    """
+    _check_admin(x_admin_token)
+    return {
+        "seeded": sorted(aa.FORWARDABLE_BETAS),
+        "refused_now": sorted(aa.refused_betas()),
+        "refusal_ttl_seconds": aa._REFUSAL_TTL,
+        "beta_gated_fields": aa.BETA_GATED_FIELDS,
+        "always_stripped_fields": list(aa.UNSUPPORTED_UPSTREAM_FIELDS),
     }
 
 
