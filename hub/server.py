@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -40,6 +41,15 @@ from . import store
 from .config import get_settings
 
 log = logging.getLogger("hub")
+# Without a level of its own this logger inherits root's WARNING, so every
+# log.info here was discarded -- the dropped-field and beta-filtering lines
+# never reached the container log, which is why they could not be found there
+# while uvicorn's own INFO access lines appeared normally. Handlers are left
+# to uvicorn, which already writes to stdout; only the level is set, and only
+# if nothing else has configured it.
+if log.level == logging.NOTSET:
+    log.setLevel(os.environ.get("HUB_LOG_LEVEL", "INFO").upper())
+
 app = FastAPI(title="GitModel Hub", version="0.1.0")
 _STATIC = Path(__file__).parent / "static"
 
