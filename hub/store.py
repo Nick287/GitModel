@@ -693,12 +693,40 @@ def usage_summary_with_cost(since: float | None, until: float | None) -> dict[st
 
 
 def recent_usage(limit: int = 50) -> list[dict[str, Any]]:
+    """Recent rows, each with the key that made it and what it was worth.
+
+    The key is joined rather than resolved in the caller so a deleted key still
+    renders: the row keeps the key it was recorded with, and key_name simply
+    comes back empty.
+
+    ``equivalent_cost`` reuses the same per-row function the summary tables are
+    built from, so a row's cost here and its contribution to the totals cannot
+    drift apart. A row priced by the upstream uses that figure; one the
+    upstream charged nothing for falls back to the local table, which is what
+    the fb_* aliases below feed -- they carry this row's own tokens precisely
+    because a single row is entirely in one bucket or the other.
+    """
+    pricing = get_pricing()
     with _conn() as c:
         rows = c.execute(
-            "SELECT ts, api_key, model, served_model, endpoint, input_tokens, "
-            "output_tokens, total_tokens, cached_tokens, cache_write_tokens, "
-            "streamed, estimated, status "
-            f"FROM {USAGE_TABLE} ORDER BY ts DESC LIMIT ?",
+            "SELECT u.ts, u.api_key, COALESCE(k.name, '') AS key_name, "
+            "u.model, u.served_model, u.endpoint, u.input_tokens, "
+            "u.output_tokens, u.total_tokens, u.cached_tokens, "
+            "u.cache_write_tokens, u.nano_aiu, u.streamed, u.estimated, u.status "
+            f"FROM {USAGE_TABLE} u LEFT JOIN api_keys k ON u.api_key = k.key "
+            "ORDER BY u.ts DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [dict(r) for r in rows]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        row = dict(r)
+        priced = {
+            **row,
+            "fb_input_tokens": 0 if row["nano_aiu"] else row["input_tokens"],
+            "fb_output_tokens": 0 if row["nano_aiu"] else row["output_tokens"],
+            "fb_cached_tokens": 0 if row["nano_aiu"] else row["cached_tokens"],
+            "fb_cache_write_tokens": 0 if row["nano_aiu"] else row["cache_write_tokens"],
+        }
+        row["equivalent_cost"] = row_equivalent_cost(pricing, priced)
+        out.append(row)
+    return out

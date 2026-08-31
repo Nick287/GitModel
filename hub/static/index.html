@@ -348,7 +348,7 @@
       <h2 data-i18n="usage.recentTitle">最近请求</h2>
       <div class="table-scroll">
         <table><thead><tr>
-          <th data-i18n="th.time">时间</th><th data-i18n="th.model">模型</th><th data-i18n="th.endpoint">端点</th><th data-i18n="th.in">输入</th><th data-i18n="th.cache">缓存读</th><th data-i18n="th.cacheWrite">缓存写</th><th data-i18n="th.out">输出</th>
+          <th data-i18n="th.time">时间</th><th data-i18n="th.apiKey">API Key</th><th data-i18n="th.model">模型</th><th data-i18n="th.endpoint">端点</th><th data-i18n="th.in">输入</th><th data-i18n="th.cache">缓存读</th><th data-i18n="th.cacheWrite">缓存写</th><th data-i18n="th.out">输出</th><th data-i18n="th.estCost">等价成本</th>
           <th data-i18n="th.streamed">流式</th><th data-i18n="th.status">状态</th>
         </tr></thead>
         <tbody id="recent-list"></tbody></table>
@@ -957,6 +957,16 @@ function money(n) { return "$" + (Number(n)||0).toLocaleString(undefined, {minim
 function esc(s) { return String(s==null?"":s).replace(/[&<>"]/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function shortModel(m) { return m ? esc(m).replace(/^claude-|^gpt-/, "") : t("common.unknown"); }
+// Who made a request, without putting a usable key on screen: the name when
+// the key has one, otherwise its last characters -- enough to tell two keys
+// apart and to match against the Keys page, useless to anyone reading over a
+// shoulder. A row whose key was since deleted keeps the tail; one recorded
+// before auth was required has no key at all.
+function keyLabel(name, key) {
+  if (name) return esc(name);
+  if (key) return `<span class="muted" title="${esc(key).slice(-6)}">…${esc(String(key).slice(-6))}</span>`;
+  return `<span class="muted">${t("common.anon")}</span>`;
+}
 
 function renderByDay(rows) {
   const el = $("by-day-chart");
@@ -998,8 +1008,7 @@ async function refreshUsage() {
     `<tr><td>${m.model?esc(m.model):t("common.unknown")}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.cached_tokens)}</td><td>${fmt(m.cache_write_tokens)}</td><td>${fmt(m.output_tokens)}</td><td>${fmt(m.total_tokens)}</td>${cell(m)}</tr>`
   ).join("") || `<tr><td colspan="9" class="muted">${t("common.noData")}</td></tr>`;
   $("by-key").innerHTML = (d.by_api_key || []).map(k => {
-    const label = k.key_name ? esc(k.key_name)
-      : (k.key ? `<span class="muted">…${esc(String(k.key).slice(-6))}</span>` : `<span class="muted">${t("common.anon")}</span>`);
+    const label = keyLabel(k.key_name, k.key);
     return `<tr><td>${label}</td><td>${fmt(k.requests)}</td><td>${fmt(k.input_tokens)}</td><td>${fmt(k.cached_tokens)}</td><td>${fmt(k.cache_write_tokens)}</td><td>${fmt(k.output_tokens)}</td><td>${fmt(k.total_tokens)}</td>${cell(k)}</tr>`;
   }).join("") || `<tr><td colspan="9" class="muted">${t("common.noData")}</td></tr>`;
   refreshRecent();
@@ -1021,10 +1030,14 @@ async function refreshRecent() {
     // made a 195k-token cache write look like a request that cost nothing.
     const cacheCell = x.cached_tokens ? fmt(x.cached_tokens) : `<span class="muted">—</span>`;
     const writeCell = x.cache_write_tokens ? fmt(x.cache_write_tokens) : `<span class="muted">—</span>`;
-    return `<tr><td>${time}</td><td>${shortModel(x.model)}</td><td>${esc(x.endpoint)}</td>
-      <td>${inCell}</td><td>${cacheCell}</td><td>${writeCell}</td><td>${fmt(x.output_tokens)}</td>
+    // A zero here means the upstream billed nothing per token -- the request
+    // went against the flat quota instead -- so it reads as "—" rather than
+    // "$0.00", which would claim the request was free.
+    const costCell = x.equivalent_cost ? money(x.equivalent_cost) : `<span class="muted">—</span>`;
+    return `<tr><td>${time}</td><td>${keyLabel(x.key_name, x.api_key)}</td><td>${shortModel(x.model)}</td><td>${esc(x.endpoint)}</td>
+      <td>${inCell}</td><td>${cacheCell}</td><td>${writeCell}</td><td>${fmt(x.output_tokens)}</td><td>${costCell}</td>
       <td>${x.streamed ? "✓" : ""}</td><td>${stTag}</td></tr>`;
-  }).join("") || `<tr><td colspan="9" class="muted">${t("common.noRecord")}</td></tr>`;
+  }).join("") || `<tr><td colspan="11" class="muted">${t("common.noRecord")}</td></tr>`;
 }
 $("btn-refresh-usage").onclick = refreshUsage;
 
