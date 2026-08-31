@@ -7,6 +7,7 @@ NOT learn: an ordinary 400 has to leave the set alone, or a bad model name
 would quietly disable features that work.
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -76,12 +77,45 @@ gate = "context-management-2025-06-27"
 payload = {"model": "m", "context_management": CM}
 out, _ = aa.strip_unsupported(payload, aa.forwardable_betas(gate))
 check("kept while the beta is forwarded", "context_management" in out, True)
-aa._REFUSED_BETAS.add(gate)  # simulate an account that refuses it
+aa._REFUSED_BETAS[gate] = time.time()  # simulate an account that refuses it
 out, dropped = aa.strip_unsupported(payload, aa.forwardable_betas(gate))
 check("dropped once the beta is withheld", "context_management" in out, False)
 check("and reported", dropped, ["context_management"])
 aa.reset_learned_betas()
 
+
+
+
+
+print("[7] a refusal expires, so the beta is retried later")
+aa.reset_learned_betas()
+aa.learn_refused_betas("unsupported beta header(s): " + NEW)
+check("withheld while the refusal is fresh", aa.forwardable_betas(NEW), None)
+# Age the entry past the window. The backend gains betas over time and a
+# replica can run for weeks, so a refusal must not outlive the condition that
+# caused it -- otherwise a now-supported feature stays off until a deploy.
+aa._REFUSED_BETAS[NEW] = time.time() - aa._REFUSAL_TTL - 1
+check("forwarded again once stale", aa.forwardable_betas(NEW), NEW)
+check("no longer counted as in force", NEW in aa.refused_betas(), False)
+
+print("[8] a stale refusal that recurs is re-learned, and does not loop")
+aa.reset_learned_betas()
+err = "unsupported beta header(s): " + NEW
+check("first refusal is actionable", aa.learn_refused_betas(err), {NEW})
+check("an immediate repeat is not", aa.learn_refused_betas(err), set())
+aa._REFUSED_BETAS[NEW] = time.time() - aa._REFUSAL_TTL - 1
+check("after expiry it is actionable again", aa.learn_refused_betas(err), {NEW})
+check("and immediately suppressed once more", aa.learn_refused_betas(err), set())
+check("still withheld", aa.forwardable_betas(NEW), None)
+
+print("[9] two betas expire independently")
+aa.reset_learned_betas()
+aa.learn_refused_betas(f"unsupported beta header(s): {NEW}, {OTHER}")
+check("both withheld", aa.forwardable_betas(f"{NEW},{OTHER}"), None)
+aa._REFUSED_BETAS[NEW] = time.time() - aa._REFUSAL_TTL - 1
+check("only the stale one returns", aa.forwardable_betas(f"{NEW},{OTHER}"), NEW)
+
+aa.reset_learned_betas()
 print()
 print("PASSED" if not failures else f"FAILED: {failures}")
 raise SystemExit(1 if failures else 0)

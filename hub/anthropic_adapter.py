@@ -14,6 +14,7 @@ history if the upstream ever stops serving Claude in the native shape.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 
@@ -166,19 +167,25 @@ FORWARDABLE_BETAS: frozenset[str] = frozenset({
     "thinking-token-count-2026-05-13",
 })
 
-# Betas this process has watched the upstream refuse, learned at runtime from
-# its own error messages rather than configured ahead of time.
+# Betas this process has watched the upstream refuse, mapped to when it last
+# said so. Learned at runtime from its own error messages rather than
+# configured ahead of time.
 #
-# The allowlist above cannot be complete: it was measured on one account, and
-# Anthropic adds betas without asking us. A beta missing from it is silently
-# dropped, which is exactly how context_management went unnoticed for months.
-# So unknown betas are forwarded optimistically and the refusal, if it comes,
-# is recorded here -- the upstream names the offending betas exactly, so this
-# is read from the response, never guessed.
+# The seeded list cannot be complete: it was measured on one account, and
+# Anthropic adds betas without asking us. A beta missing from it would be
+# silently dropped, which is exactly how context_management went unnoticed for
+# months. So unknown betas are forwarded optimistically and the refusal, if it
+# comes, is recorded here -- the upstream names the offending betas exactly, so
+# this is read from the response, never guessed.
 #
-# Process-local and unbounded only by how many distinct betas a client sends,
-# which is a handful. Lost on restart, which just means relearning once.
-_REFUSED_BETAS: set[str] = set()
+# Entries expire because a refusal is a fact about today, not a verdict. The
+# backend gains betas over time, and a replica can run for weeks; without an
+# expiry the first refusal would outlive the condition that caused it and keep
+# a now-supported feature switched off until the next deploy. Retrying costs
+# one extra round trip on one request per beta per window, and only when a
+# client actually asks for that beta.
+_REFUSAL_TTL = 6 * 3600.0
+_REFUSED_BETAS: dict[str, float] = {}
 
 # The upstream's wording for this, e.g.
 #   "unsupported beta header(s): advisor-tool-2026-03-01"
@@ -214,21 +221,25 @@ def parse_refused_betas(upstream_error: str) -> set[str]:
 
 
 def learn_refused_betas(upstream_error: str) -> set[str]:
-    """Record what the upstream refused; return the newly learned betas.
+    """Record what the upstream refused; return the betas worth retrying without.
 
-    Only entries the upstream actually named are stored, and only ones not
-    already known, so a caller can log a genuine discovery without repeating
-    itself on every subsequent request.
+    Returns only betas that were not already in force -- newly seen, or seen
+    long enough ago to have expired. That is what makes a retry safe to trigger
+    on: a refusal already in effect returns nothing, so the caller cannot loop
+    on the same answer.
     """
-    refused = parse_refused_betas(upstream_error)
-    new = refused - _REFUSED_BETAS - FORWARDABLE_BETAS
-    _REFUSED_BETAS.update(refused - FORWARDABLE_BETAS)
-    return new
+    refused = parse_refused_betas(upstream_error) - FORWARDABLE_BETAS
+    now = time.time()
+    actionable = {b for b in refused if _REFUSED_BETAS.get(b, 0.0) + _REFUSAL_TTL <= now}
+    for b in refused:
+        _REFUSED_BETAS[b] = now
+    return actionable
 
 
 def refused_betas() -> frozenset[str]:
-    """What this process has learned so far. Exposed for tests and diagnostics."""
-    return frozenset(_REFUSED_BETAS)
+    """Refusals currently in force. Exposed for tests and diagnostics."""
+    cutoff = time.time() - _REFUSAL_TTL
+    return frozenset(b for b, seen in _REFUSED_BETAS.items() if seen > cutoff)
 
 
 def reset_learned_betas() -> None:
@@ -241,11 +252,11 @@ def forwardable_betas(header: str | None) -> str | None:
 
     Everything known-good is forwarded, and so is anything unrecognised --
     optimistically, since the alternative is dropping a feature the backend may
-    well support and never finding out. What has been seen refused is withheld,
-    because the header is validated all-or-nothing and one bad entry fails the
-    whole request.
+    well support and never finding out. Only a refusal seen within the last
+    window is withheld, because the header is validated all-or-nothing and one
+    bad entry fails the whole request.
     """
-    keep = _betas(header) - _REFUSED_BETAS
+    keep = _betas(header) - refused_betas()
     return ",".join(sorted(keep)) if keep else None
 
 
