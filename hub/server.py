@@ -540,9 +540,14 @@ async def v1_messages_count_tokens(request: Request) -> Any:
     mapped = aa.map_model(body.get("model"))
     if mapped != body.get("model"):
         body = {**body, "model": mapped}
-    body, _ = aa.strip_unsupported(body)
+    beta_in = request.headers.get("anthropic-beta")
+    body, _ = aa.strip_unsupported(body, beta_in)
+    beta_out = aa.forwardable_betas(beta_in)
     try:
-        status, data = await cc.post_json("/v1/messages/count_tokens", body)
+        status, data = await cc.post_json(
+            "/v1/messages/count_tokens", body,
+            {"anthropic-beta": beta_out} if beta_out else None,
+        )
     except cc.NotAuthenticatedError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except RuntimeError as e:
@@ -576,17 +581,25 @@ async def v1_messages(request: Request) -> Any:
 
     # Passthrough forwards the body verbatim, which means fields the Anthropic
     # API accepts but Copilot does not reach the upstream and get the whole
-    # request rejected. Claude Code sends context_management on every turn, so
-    # this is the difference between working and failing outright.
-    req, dropped = aa.strip_unsupported(req)
+    # request rejected. Some are refused outright; context_management is only
+    # refused when its beta header is missing, so the caller's header decides.
+    beta_in = request.headers.get("anthropic-beta")
+    req, dropped = aa.strip_unsupported(req, beta_in)
     if dropped:
         log.info("dropped unsupported fields for upstream: %s", ", ".join(dropped))
 
-    vision_headers = (
-        {"Copilot-Vision-Request": "true"}
-        if aa.has_image_content_anthropic(req)
-        else None
-    )
+    # Forward the betas upstream verifiably accepts and drop the rest: the
+    # header is validated all-or-nothing, so passing an unknown one through
+    # would fail the request instead of just losing that feature. Discarding
+    # the header wholesale was the old behaviour, and it silently disabled
+    # every beta -- context-1m and effort included.
+    beta_out = aa.forwardable_betas(beta_in)
+    upstream_headers: dict[str, str] = {}
+    if beta_out:
+        upstream_headers["anthropic-beta"] = beta_out
+    if aa.has_image_content_anthropic(req):
+        upstream_headers["Copilot-Vision-Request"] = "true"
+    vision_headers = upstream_headers or None
 
     if not stream:
         try:

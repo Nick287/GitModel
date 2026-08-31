@@ -97,39 +97,116 @@ def has_image_content(openai_payload: dict[str, Any]) -> bool:
     return False
 
 
-# Request fields the Anthropic API accepts but the Copilot backend rejects with
-# 400 "Extra inputs are not permitted". Verified against the live upstream --
-# see scripts/probe_rejected_fields.py, which re-runs the check.
+# Request fields the Copilot backend rejects outright, with or without the beta
+# header Anthropic documents for them. Measured against the live upstream by
+# scripts/probe_upstream_fields.py, which re-runs the check:
 #
-# This matters only because we pass the body through verbatim. The old
-# translation layer rebuilt the request from the fields it understood, so it
-# dropped these as a side effect; passthrough forwards them and the upstream
-# refuses the whole request.
+#   fallbacks    -> 400 "Extra inputs are not permitted" even with its header
+#   mcp_servers  -> 400 "unsupported beta header(s): mcp-client-2025-11-20"
 #
-# `context_management` is the one that actually bites: Claude Code sends it on
-# every turn, so leaving it in makes the client fail 100% of the time. The
-# others are included because they fail the same way if a client sends them.
+# Dropping these is the right trade: they tune behaviour (server-side
+# fallbacks, MCP) rather than determining the answer, so a request that ignores
+# them still returns a correct response -- whereas forwarding them returns
+# nothing at all.
+#
+# `container` was in this list until it was probed properly. It answers 200 on
+# its own, and rejects a bad value with a *shape* error rather than "Extra
+# inputs are not permitted" -- which only a field in the backend's schema can
+# do. Its 400 came from the beta headers it was tested with, not from itself.
 UNSUPPORTED_UPSTREAM_FIELDS = (
-    "context_management",
     "fallbacks",
-    "container",
     "mcp_servers",
 )
 
+# Fields the backend supports, but only when their beta header rides along.
+#
+# `context_management` sat in the list above until it was tested both ways:
+#
+#   context_management, no header  -> 400 "Extra inputs are not permitted"
+#   context_management + header    -> 200
+#
+# Identical symptom, opposite cause. Stripping it unconditionally meant every
+# client asking for context editing silently did not get it -- and Claude Code
+# sends it on every turn, so that was every long session losing the cleanup
+# that keeps it inside the context window.
+#
+# So the rule is conditional: forward when the caller sent the header (the
+# backend honours it), strip when they did not (the backend would reject the
+# whole request). Stripping stays the fallback because a degraded answer beats
+# no answer.
+BETA_GATED_FIELDS: dict[str, str] = {
+    "context_management": "context-management-2025-06-27",
+}
 
-def strip_unsupported(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+# Betas the backend is KNOWN to accept, each verified by sending it alone and
+# reading the reply -- not by reading Anthropic's docs, since the backend
+# serves its own subset.
+#
+# An allowlist rather than a blocklist because the header is validated
+# ALL-OR-NOTHING: one unrecognised entry fails the entire request. Measured:
+# these nine sent together answer 200, and adding a single refused beta to them
+# turns the same request into a 400. Dropping an unknown beta costs that one
+# feature; forwarding it costs the request.
+#
+# Known refused: advisor-tool-2026-03-01, code-execution-2025-08-25,
+# skills-2025-10-02.
+#
+# To add an entry, send it upstream on a throwaway request first --
+# scripts/probe_upstream_betas.py does exactly that. 200 means add it;
+# "unsupported beta header(s): X" means leave it out.
+FORWARDABLE_BETAS: frozenset[str] = frozenset({
+    "claude-code-20250219",
+    "context-1m-2025-08-07",
+    "context-management-2025-06-27",
+    "effort-2025-11-24",
+    "fallback-credit-2026-06-01",
+    "interleaved-thinking-2025-05-14",
+    "mid-conversation-system-2026-04-07",
+    "prompt-caching-scope-2026-01-05",
+    "thinking-token-count-2026-05-13",
+})
+
+
+def _betas(header: str | None) -> set[str]:
+    """Parse an ``anthropic-beta`` header into a set.
+
+    The header may carry several betas as a comma-separated list, so a
+    substring test would match the wrong things.
+    """
+    if not header:
+        return set()
+    return {part.strip() for part in header.split(",") if part.strip()}
+
+
+def forwardable_betas(header: str | None) -> str | None:
+    """The caller's betas that upstream accepts, as a header value or None.
+
+    Everything unverified is dropped rather than passed along, since a single
+    unknown entry would fail the whole request.
+    """
+    keep = _betas(header) & FORWARDABLE_BETAS
+    return ",".join(sorted(keep)) if keep else None
+
+
+def strip_unsupported(
+    payload: dict[str, Any], beta_header: str | None = None
+) -> tuple[dict[str, Any], list[str]]:
     """Drop request fields the Copilot backend cannot accept.
 
     Returns ``(payload, dropped)``. The input is never mutated; when nothing
     needs dropping the original object is returned unchanged so the common path
     stays allocation-free.
 
-    Dropping is the right trade-off here: these fields tune behaviour
-    (context editing, server-side fallbacks, MCP) rather than determining the
-    answer, so a request that ignores them still returns a correct response --
-    whereas forwarding them returns nothing at all.
+    ``beta_header`` is the caller's raw ``anthropic-beta`` value. Without it
+    every beta-gated field is stripped, which is both the old behaviour and the
+    safe default for a caller that has not been updated to pass it.
     """
+    active = _betas(beta_header)
     dropped = [f for f in UNSUPPORTED_UPSTREAM_FIELDS if f in payload]
+    dropped += [
+        f for f, needed in BETA_GATED_FIELDS.items()
+        if f in payload and needed not in active
+    ]
     if not dropped:
         return payload, []
     return {k: v for k, v in payload.items() if k not in dropped}, dropped

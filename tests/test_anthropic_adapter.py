@@ -98,12 +98,37 @@ def test_context_management_is_stripped():
 
 
 def test_strip_does_not_mutate_the_input():
+    # `mcp_servers` rather than `container`: probing the upstream showed
+    # container is accepted (it validates the value's shape instead of
+    # refusing the key), so it is no longer stripped and cannot stand in for
+    # a dropped field here. What this test is really about is the copy.
     req = _request("hi")
-    req["container"] = {"skills": []}
+    req["mcp_servers"] = [{"type": "url", "url": "https://x", "name": "n"}]
     out, dropped = strip_unsupported(req)
-    assert dropped == ["container"]
-    assert "container" in req  # caller's object untouched
+    assert dropped == ["mcp_servers"]
+    assert "mcp_servers" in req  # caller's object untouched
     assert out is not req
+
+
+def test_container_is_forwarded():
+    # Measured against the live upstream: `container` alone answers 200, and a
+    # bad value comes back as a shape error rather than "Extra inputs are not
+    # permitted" -- which only a field the backend knows can produce.
+    req = _request("hi")
+    req["container"] = {"id": "abc"}
+    out, dropped = strip_unsupported(req)
+    assert dropped == []
+    assert out["container"] == {"id": "abc"}
+
+
+def test_context_management_survives_when_its_beta_header_is_present():
+    # The upstream accepts the field only with this header, so stripping it
+    # depends on the caller rather than on the field alone.
+    req = _request("hi")
+    req["context_management"] = {"edits": [{"type": "clear_tool_uses_20250919"}]}
+    out, dropped = strip_unsupported(req, "context-management-2025-06-27")
+    assert dropped == []
+    assert out["context_management"] == req["context_management"]
 
 
 def test_strip_returns_the_original_object_when_nothing_to_drop():
