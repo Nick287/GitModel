@@ -85,7 +85,11 @@ variable "cpu" {
 }
 
 variable "memory" {
-  type        = string
-  description = "Memory per replica (must pair with cpu, e.g. 1.0Gi for 0.5 vCPU)."
-  default     = "1.0Gi"
+  type = string
+  # Azure stores this as "1Gi", so "1.0Gi" -- the same quantity written
+  # differently -- shows up as a change on every plan. azurerm 4.76 normalised
+  # the two; 4.81 does not, so the default has to match what the API returns or
+  # every plan carries a diff that means nothing and trains you to skim past it.
+  description = "Memory per replica (must pair with cpu, e.g. 1Gi for 0.5 vCPU)."
+  default     = "1Gi"
 }
