@@ -397,6 +397,18 @@
       </p>
     </div>
     <div class="card">
+      <h2 data-i18n="settings.usageTitle">返回 Copilot 用量信息</h2>
+      <div class="row">
+        <label class="switch"><input type="checkbox" id="toggle-usage" /><span class="slider"></span></label>
+        <span id="usage-text" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top:10px" data-i18n-html="settings.usageNote">
+        开启后，响应中保留上游的 <code>copilot_usage</code> 字段（默认）。
+        关闭后会在返回给客户端前移除它，<b>流式与非流式都生效</b>。
+        本页的用量与成本统计不受影响 —— 计费在移除之前已经读取完毕。
+      </p>
+    </div>
+    <div class="card">
       <h2 data-i18n="settings.imageTitle">图片生成（Azure GPT Image）</h2>
       <p class="muted" style="margin:0 0 12px" data-i18n-html="settings.imageNote">
         配置一个 Azure OpenAI <code>gpt-image</code> 部署，网关即对外暴露
@@ -594,6 +606,10 @@ const I18N = {
     "key.created": "已生成 key",
     "settings.authOn": "已开启（下游需带 API key）",
     "settings.authOff": "已关闭（本机任意请求可调用）",
+    "settings.usageTitle": "返回 Copilot 用量信息",
+    "settings.usageOn": "保留（响应中含 copilot_usage）",
+    "settings.usageOff": "已移除（客户端看不到 copilot_usage）",
+    "settings.usageNote": "开启后，响应中保留上游的 <code>copilot_usage</code> 字段（默认）。关闭后会在返回给客户端前移除它，<b>流式与非流式都生效</b>。本页的用量与成本统计不受影响 —— 计费在移除之前已经读取完毕。",
     "price.delete": "删除",
     "price.needModel": "请填写模型名",
     "common.saved": "已保存",
@@ -746,6 +762,10 @@ const I18N = {
     "key.created": "Key created",
     "settings.authOn": "On (clients must send an API key)",
     "settings.authOff": "Off (any local request is allowed)",
+    "settings.usageTitle": "Return Copilot usage details",
+    "settings.usageOn": "Kept (responses include copilot_usage)",
+    "settings.usageOff": "Removed (clients never see copilot_usage)",
+    "settings.usageNote": "On keeps the upstream <code>copilot_usage</code> block in responses (the default). Off removes it just before the response is sent, <b>for streaming and non-streaming alike</b>. Usage and cost on this page are unaffected -- billing reads the block before it is removed.",
     "price.delete": "Delete",
     "price.needModel": "Please enter a model name",
     "common.saved": "Saved",
@@ -794,6 +814,7 @@ function rerenderDynamic() {
   if (!appInited) return;
   refreshStatus();
   setAuthText(_lastAuth);
+  setUsageText(_lastUsage);
   if (_lastImage) renderImageSettings(_lastImage);
   renderPricing();
   const tab = document.querySelector("nav.tabs button.active");
@@ -1114,6 +1135,11 @@ async function loadSettings() {
   const d = await r.json();
   $("toggle-auth").checked = !!d.require_auth;
   setAuthText(d.require_auth);
+  // Absent on a hub that predates the setting: default to exposing, which
+  // is what those deployments have always done.
+  const expose = d.expose_copilot_usage !== false;
+  $("toggle-usage").checked = expose;
+  setUsageText(expose);
   PRICING = d.pricing || {};
   renderPricing();
   if (d.image) renderImageSettings(d.image);
@@ -1143,11 +1169,21 @@ $("btn-save-image").onclick = async () => {
   } else { $("image-msg").style.color = "var(--red)"; $("image-msg").textContent = t("common.saveFail"); }
 };
 let _lastAuth = false;
+let _lastUsage = true;
 function setAuthText(on) { _lastAuth = !!on; $("auth-text").textContent = on ? t("settings.authOn") : t("settings.authOff"); }
 $("toggle-auth").onchange = async () => {
   const on = $("toggle-auth").checked;
   const r = await api("/api/settings", { method:"POST", body: JSON.stringify({ require_auth: on }) });
   if (r.ok) { const d = await r.json(); $("toggle-auth").checked = !!d.require_auth; setAuthText(d.require_auth); }
+};
+function setUsageText(on) { _lastUsage = !!on; $("usage-text").textContent = on ? t("settings.usageOn") : t("settings.usageOff"); }
+$("toggle-usage").onchange = async () => {
+  const on = $("toggle-usage").checked;
+  const r = await api("/api/settings", { method:"POST", body: JSON.stringify({ expose_copilot_usage: on }) });
+  // Re-read from the response rather than trusting the click: if the write
+  // failed the switch has to snap back to what the server actually holds.
+  if (r.ok) { const d = await r.json(); $("toggle-usage").checked = !!d.expose_copilot_usage; setUsageText(d.expose_copilot_usage); }
+  else { $("toggle-usage").checked = !on; toast(t("common.saveFail"), "err"); }
 };
 
 // ---------- Pricing editor ----------

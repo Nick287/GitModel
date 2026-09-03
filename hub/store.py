@@ -218,6 +218,24 @@ def set_require_auth(enabled: bool) -> None:
     set_setting("require_auth", "1" if enabled else "0")
 
 
+def get_expose_copilot_usage(default: bool = True) -> bool:
+    """Whether responses keep upstream's ``copilot_usage`` block.
+
+    Defaults to exposing it, which is the behaviour every existing deployment
+    already has; turning it off is an opt-in. Hiding it only changes what the
+    caller sees -- billing reads the block before it is removed, so usage rows
+    and costs are identical either way.
+    """
+    val = get_setting("expose_copilot_usage")
+    if val is None:
+        return default
+    return val == "1"
+
+
+def set_expose_copilot_usage(enabled: bool) -> None:
+    set_setting("expose_copilot_usage", "1" if enabled else "0")
+
+
 # --------------------------------------------------------------------------- #
 # Azure image backend config (endpoint / api key / default model) — JSON blob
 # --------------------------------------------------------------------------- #

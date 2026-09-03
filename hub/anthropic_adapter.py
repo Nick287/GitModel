@@ -87,6 +87,51 @@ def map_model(name: str | None) -> str | None:
     return name
 
 
+def strip_copilot_usage(obj: Any) -> bool:
+    """Remove ``copilot_usage`` from a response object. True if anything went.
+
+    The block names the upstream this hub is really talking to and carries its
+    internal billing units, neither of which a client asked for. It is removed
+    on the way out, never on the way in: everything that prices a request has
+    already read it by then, so hiding it changes what the caller sees and
+    nothing else.
+
+    Buffered responses carry it at the top level; SSE events put it on the
+    finish chunk, sometimes nested under ``message`` (Anthropic) or
+    ``response`` (Responses API), so all three places are checked.
+    """
+    if not isinstance(obj, dict):
+        return False
+    removed = obj.pop("copilot_usage", None) is not None
+    for key in ("message", "response"):
+        nested = obj.get(key)
+        if isinstance(nested, dict) and nested.pop("copilot_usage", None) is not None:
+            removed = True
+    return removed
+
+
+def strip_copilot_usage_sse(line: str) -> str:
+    """Rewrite one SSE line with ``copilot_usage`` removed, or return it as-is.
+
+    Works a line at a time so the stream keeps flowing rather than being
+    buffered to the end, and re-serialises only the one event that carries the
+    block -- every other line is returned untouched, including anything that
+    is not JSON or not a data line.
+    """
+    if "copilot_usage" not in line or not line.startswith("data:"):
+        return line
+    payload = line[len("data:"):].strip()
+    if not payload or payload == "[DONE]":
+        return line
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        return line
+    if not strip_copilot_usage(obj):
+        return line
+    return "data: " + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
 def has_image_content(openai_payload: dict[str, Any]) -> bool:
     """True if any message in an OpenAI-shaped payload carries an image part."""
     for msg in openai_payload.get("messages") or []:

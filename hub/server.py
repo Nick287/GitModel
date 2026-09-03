@@ -236,6 +236,40 @@ def _norm_usage(usage: dict[str, Any] | None, *, responses_shape: bool) -> tuple
     return i, o, t, cached
 
 
+async def _forward_stream(
+    chunks: AsyncIterator[bytes], collected: list[str], strip_usage: bool,
+) -> AsyncIterator[bytes]:
+    """Forward upstream chunks, appending the raw text to ``collected``.
+
+    ``collected`` always receives the untouched bytes, so the usage parsing
+    that runs afterwards sees what the upstream actually sent regardless of
+    what the client is shown -- billing must not depend on a display setting.
+
+    With stripping off this is a byte-for-byte passthrough and costs nothing.
+    With it on, output is re-emitted a line at a time: SSE is line-oriented,
+    but a chunk can split a line anywhere, so a partial tail is held back
+    until its newline arrives rather than being parsed as if complete. Only
+    the one line carrying the block is re-serialised; the rest pass through as
+    they were.
+    """
+    if not strip_usage:
+        async for chunk in chunks:
+            collected.append(chunk.decode("utf-8", "replace"))
+            yield chunk
+        return
+
+    pending = ""
+    async for chunk in chunks:
+        text = chunk.decode("utf-8", "replace")
+        collected.append(text)
+        pending += text
+        while "\n" in pending:
+            line, pending = pending.split("\n", 1)
+            yield (aa.strip_copilot_usage_sse(line) + "\n").encode("utf-8")
+    if pending:
+        yield aa.strip_copilot_usage_sse(pending).encode("utf-8")
+
+
 def _passthrough_status(upstream: int) -> int:
     """Map an upstream status onto one that means the same thing to our client.
 
@@ -393,6 +427,10 @@ async def _passthrough(
                 endpoint=endpoint, usage3=(i, o, t), streamed=False,
                 estimated=False, cached=cached or counts.get("cache_read", 0),
                 cache_write=counts.get("cache_write", 0), nano_aiu=nano)
+        # After billing has read it, not before: the row above is identical
+        # whether or not the caller gets to see the block.
+        if not store.get_expose_copilot_usage():
+            aa.strip_copilot_usage(data)
         return JSONResponse(data)
 
     # Streaming passthrough. Ask the backend to report usage for chat.
@@ -431,10 +469,10 @@ async def _passthrough(
 
     async def gen() -> AsyncIterator[bytes]:
         collected: list[str] = []
+        expose = store.get_expose_copilot_usage()
         try:
-            async for chunk in chunks:
-                collected.append(chunk.decode("utf-8", "replace"))
-                yield chunk
+            async for out in _forward_stream(chunks, collected, not expose):
+                yield out
         finally:
             usage, nano, counts = _parse_sse_usage(
                 "".join(collected), responses_shape=responses_shape
@@ -689,6 +727,8 @@ async def v1_messages(request: Request) -> Any:
                 streamed=False, estimated=False,
                 cached=cached, cache_write=cache_write,
                 nano_aiu=nano)
+        if not store.get_expose_copilot_usage():
+            aa.strip_copilot_usage(data)
         return JSONResponse(data)
 
     # Connect before returning a StreamingResponse. Once that response starts,
@@ -741,10 +781,10 @@ async def v1_messages(request: Request) -> Any:
 
     async def gen() -> AsyncIterator[bytes]:
         collected: list[str] = []
+        expose = store.get_expose_copilot_usage()
         try:
-            async for chunk in chunks:
-                collected.append(chunk.decode("utf-8", "replace"))
-                yield chunk
+            async for out in _forward_stream(chunks, collected, not expose):
+                yield out
         finally:
             text = "".join(collected)
             nano, counts = 0, {}
@@ -846,6 +886,7 @@ async def api_get_settings(x_admin_token: str | None = Header(default=None)) -> 
     img = store.get_image_config()
     return {
         "require_auth": store.get_require_auth(s.require_auth),
+        "expose_copilot_usage": store.get_expose_copilot_usage(),
         "pricing": store.get_pricing(),
         "image": {
             "endpoint": img.get("endpoint", ""),
@@ -863,6 +904,8 @@ async def api_set_settings(
     body = await request.json()
     if "require_auth" in body:
         store.set_require_auth(bool(body["require_auth"]))
+    if "expose_copilot_usage" in body:
+        store.set_expose_copilot_usage(bool(body["expose_copilot_usage"]))
     if "pricing" in body and isinstance(body["pricing"], dict):
         store.set_pricing(body["pricing"])
     if "image" in body and isinstance(body["image"], dict):
@@ -874,6 +917,7 @@ async def api_set_settings(
     img = store.get_image_config()
     return {
         "require_auth": store.get_require_auth(s.require_auth),
+        "expose_copilot_usage": store.get_expose_copilot_usage(),
         "pricing": store.get_pricing(),
         "image": {
             "endpoint": img.get("endpoint", ""),
