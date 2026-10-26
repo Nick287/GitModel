@@ -4,6 +4,24 @@ variable "resource_group_name" {
   default     = "gitmodel-rg"
 }
 
+variable "private_storage" {
+  type        = bool
+  description = "Use a custom VNet and Azure Files private endpoint with storage public access disabled."
+  default     = false
+}
+
+variable "consumption_workload_profile" {
+  type        = bool
+  description = "Explicitly configure the built-in Consumption workload profile without requiring a custom VNet."
+  default     = false
+}
+
+variable "environment_name" {
+  type        = string
+  description = "Optional Container Apps environment name, allowing a replacement environment alongside the existing one."
+  default     = null
+}
+
 variable "location" {
   type        = string
   description = "Azure region for all resources."

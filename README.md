@@ -205,7 +205,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 - 自动新建一个 Standard LRS 存储账户 + file share（随机后缀命名），Azure Files 挂载到
   `/data` 持久化 SQLite；挂载用 `nobrl` 选项关闭 SMB 字节范围锁（否则全新 share 上首次建库
   会报 `database is locked`）
-- 单副本（SQLite 为 WAL 单写者，**切勿多副本**）
+- 单副本，Azure Files 使用 `HUB_DB_JOURNAL_MODE=TRUNCATE`，**切勿多副本或在 SMB 上启用 WAL**
 - 资源组在创建时即打上 `SecurityControl = Ignore` 标签
 
 ### 前置条件
@@ -227,6 +227,90 @@ terraform apply
 `terraform.tfvars` 里**没有必填变量** —— 所有变量都有默认值（资源组名、区域、ACR/存储名、
 镜像名/tag…）。如需自定义，复制 `terraform.tfvars.example` 后覆盖即可。
 
+### 多订阅与独立环境
+
+每个环境使用独立 Terraform workspace 和显式参数文件。`terraform.tfvars` 会在所有
+工作区自动加载，不要在其中放环境专用配置。真实 `*.tfvars`、状态和计划文件均不提交 Git。
+
+以下记录截至 **2026-10-26**，地址可能在重建环境后改变：
+
+| 工作区 | 资源组 | 网络与存储 | 应用地址 |
+| --- | --- | --- | --- |
+| `default` | `gitmodel-rg` | 自定义 VNet、Azure Files 私有端点，存储公网关闭 | https://gitmodel-hub.bravecliff-24e5f25b.centralus.azurecontainerapps.io |
+| `liang` | `gitmodel-rg-liang` | 自定义 VNet、Azure Files 私有端点，存储公网关闭 | https://gitmodelliang-hub.calmcliff-81dbca2e.centralus.azurecontainerapps.io |
+| `qitie` | `gitmodel-rg-qitie` | 无自定义 VNet、无私有端点，Azure Files 通过认证公网端点挂载 | https://gitmodelqitie-hub.lemonground-a761cdbc.centralus.azurecontainerapps.io |
+
+`default` 和 `liang` 位于订阅 `655bd0bc-917a-4852-a52c-4b6d43704bc1`；
+`qitie` 位于 Qi Tie 订阅 `14fa7af3-564a-40ab-b0fb-b87a726e86a4`。
+三者均使用 Central US、Consumption、单副本、0.5 vCPU / 1 GiB，应用入口保持公网 HTTPS。
+
+更新原生产环境时必须指定生产参数，避免回退到公网存储配置：
+
+```bash
+export ARM_SUBSCRIPTION_ID=655bd0bc-917a-4852-a52c-4b6d43704bc1
+export ARM_TENANT_ID=d7363bc7-e84d-4d15-8b53-a5a3151324bd
+TF_WORKSPACE=default terraform plan -var-file=prod.tfvars
+TF_WORKSPACE=default terraform apply -var-file=prod.tfvars
+```
+
+上述命令在 `infra/` 下执行；更新 `liang` 时改用 `TF_WORKSPACE=liang` 和
+`-var-file=liang.tfvars`。各参数文件应包含：
+
+| 参数文件 | `resource_group_name` | `prefix` | `private_storage` | `environment_name` |
+| --- | --- | --- | --- | --- |
+| `prod.tfvars` | `gitmodel-rg` | `gitmodel` | `true` | `gitmodel-env-vnet` |
+| `liang.tfvars` | `gitmodel-rg-liang` | `gitmodelliang` | `true` | `gitmodelliang-env-vnet` |
+| `qitie.tfvars` | `gitmodel-rg-qitie` | `gitmodelqitie` | `false` | `gitmodelqitie-env` |
+
+`qitie.tfvars` 还需设置 `consumption_workload_profile = true`，与 Azure 自动配置的
+Consumption profile 对齐，避免反复出现差异；这个开关不启用 VNet 或 Dedicated profile。
+
+```bash
+export ARM_SUBSCRIPTION_ID=14fa7af3-564a-40ab-b0fb-b87a726e86a4
+export ARM_TENANT_ID=15ec535b-fac5-4eed-aaea-32449930c17e
+TF_WORKSPACE=qitie terraform plan -var-file=qitie.tfvars
+TF_WORKSPACE=qitie terraform apply -var-file=qitie.tfvars
+```
+
+首次部署新环境需先创建独立工作区：`terraform workspace new <环境名>`。
+切换 CLI 订阅前后都应检查 `az account show`，并同步设置 `ARM_SUBSCRIPTION_ID` 和
+`ARM_TENANT_ID`，不要复用其他订阅的 Terraform 状态。
+
+### 私网成本与运行要求
+
+`private_storage=true` 创建 VNet、应用子网、私有端点子网、Azure Files 私有端点和
+私有 DNS；已有默认网络环境需要重建，默认应用域名会改变，但存储账号和共享可以保留。
+
+按 730 小时/月的美元公开价估算，当前每个自定义 VNet 环境固定网络费用约
+**$29.70/月**：Private Endpoint $7.30、私有 DNS Zone $0.50、Container Apps 托管
+Standard Load Balancer $18.25、Standard 公网 IP $3.65，另加数据处理和 DNS 查询费用。
+这些托管网络资源是自定义 VNet 环境的配套资源，不是 Storage 私有端点本身创建的。
+实际费用以区域、合同和账单为准；`qitie` 未创建这些自定义 VNet 配套资源。
+
+Azure Files SMB 挂载在公网和私网模式下都需要 `shared_access_key_enabled=true`。
+`SecurityControl=Ignore` 是当前组织策略的例外标签，不是通用 Azure 安全机制；若标签或
+存储认证开关被外部策略修改，需检查实际配置，不能只根据旧 Terraform 状态判断。
+所有环境均关闭匿名 Blob 访问；存储公网可达不代表无需认证。
+
+### 数据迁移与备份记录
+
+- `gitmodel-rg`、`gitmodel-rg-liang` 已升级私网，保留各自原存储和数据库。
+- 临时环境 `gitmodel-rg001` 已销毁，18 个 Terraform 资源及其存储、备份均已删除。
+  `rg001` 工作区保留为空；未经明确需要，不要再次应用其参数文件而重建环境。
+- `liang` 在线一致性备份保存在本地 `db-backup/liang/hub-liang-20261026T102542Z.db`，
+  大小 1,458,176 字节，已验证 SHA-256、SQLite 完整性和各表行数。
+- `qitie` 已恢复上述快照，包含 3 个 API key、3,552 条旧用量和 4,825 条当前用量记录。
+  管理员账号密码、Copilot 凭据也继承自快照；此前为新实例生成的随机管理员密码已失效。
+  恢复后已验证原 key、40 个模型列表和实际推理；线上 `liang` 未改动。
+- `qitie` 恢复前的数据库保留在本地
+  `db-backup/qitie/pre-liang-restore-20261026T155230Z/original/hub.db`，可用于回退。
+  两个运行中的环境使用独立数据库，后续记录不会自动同步。
+
+备份数据库包含 OAuth 凭据、管理员密码哈希和 API key，**不能提交 Git 或上传到公开位置**。
+本地备份目录权限为 `700`、文件权限为 `600`，`db-backup/` 已被 Git 忽略。
+在线备份使用 SQLite backup API，不直接复制正在写入的数据库；恢复时先暂存校验、
+停止目标写入并备份原库，再替换数据库，处理旧 journal/WAL/SHM 文件，验证后恢复服务。
+
 > **存储说明**：存储账户与 file share 都在应用所在资源组内由 Terraform 创建（不再依赖外部
 > 存储账户 / connection string）。`*.tfstate` 含敏感信息，已被 `.gitignore` 排除，**切勿提交**。
 
@@ -239,6 +323,9 @@ terraform apply
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `resource_group_name` | `gitmodel-rg` | 新建的资源组名 |
+| `private_storage` | `false` | 自定义 VNet、Azure Files 私有端点及关闭存储公网访问 |
+| `consumption_workload_profile` | `false` | 无需 VNet，显式配置内置 Consumption profile；私网模式也会启用该 profile |
+| `environment_name` | `null` | 可选环境名，默认 `${prefix}-env`；替换网络环境时可指定新名称 |
 | `location` | `centralus` | Azure 区域 |
 | `prefix` | `gitmodel` | 资源名前缀（身份 / 环境 / App / ACR 名都基于它）|
 | `image_name` | `gitmodel` | 镜像仓库名（tag 由源码哈希自动生成）|
@@ -248,7 +335,7 @@ terraform apply
 | `login_max_fails` | `5` | 登录失败锁定阈值（`0` 关闭限流）|
 | `login_lock_seconds` | `900` | 锁定时长（秒）|
 | `cpu` | `0.5` | 每副本 vCPU |
-| `memory` | `1.0Gi` | 每副本内存（需与 `cpu` 匹配）|
+| `memory` | `1Gi` | 每副本内存（需与 `cpu` 匹配）|
 
 部分资源名在 `main.tf` 中由 `prefix` 拼接而成：
 

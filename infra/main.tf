@@ -127,12 +127,13 @@ resource "random_string" "storage_suffix" {
 }
 
 resource "azurerm_storage_account" "data" {
-  name                      = "${var.prefix}${random_string.storage_suffix.result}"
-  resource_group_name       = azurerm_resource_group.rg.name
-  location                  = azurerm_resource_group.rg.location
-  account_tier              = "Standard"
-  account_replication_type  = "LRS"
-  shared_access_key_enabled = true
+  name                          = "${var.prefix}${random_string.storage_suffix.result}"
+  resource_group_name           = azurerm_resource_group.rg.name
+  location                      = azurerm_resource_group.rg.location
+  account_tier                  = "Standard"
+  account_replication_type      = "LRS"
+  shared_access_key_enabled     = true
+  public_network_access_enabled = !var.private_storage
   # The /data share holds the SQLite DB; nothing here should ever be anonymously
   # reachable. Pin blob public access off (also the org-policy default), which
   # keeps `terraform plan` clean instead of drifting back to the schema default.
@@ -148,9 +149,18 @@ resource "azurerm_storage_share" "data" {
 # --- Container Apps environment + app -------------------------------------
 
 resource "azurerm_container_app_environment" "env" {
-  name                = "${var.prefix}-env"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
+  name                     = coalesce(var.environment_name, "${var.prefix}-env")
+  resource_group_name      = azurerm_resource_group.rg.name
+  location                 = azurerm_resource_group.rg.location
+  infrastructure_subnet_id = var.private_storage ? azurerm_subnet.apps[0].id : null
+
+  dynamic "workload_profile" {
+    for_each = var.private_storage || var.consumption_workload_profile ? [1] : []
+    content {
+      name                  = "Consumption"
+      workload_profile_type = "Consumption"
+    }
+  }
 }
 
 resource "azurerm_container_app_environment_storage" "data" {
@@ -160,6 +170,8 @@ resource "azurerm_container_app_environment_storage" "data" {
   access_key                   = azurerm_storage_account.data.primary_access_key
   share_name                   = azurerm_storage_share.data.name
   access_mode                  = "ReadWrite"
+
+  depends_on = [azurerm_private_endpoint.files, azurerm_private_dns_zone_virtual_network_link.files]
 
   # An env storage can't be deleted while the app's volume still references it.
   # create_before_destroy flips the replace order to: create the new storage →
@@ -175,6 +187,7 @@ resource "azurerm_container_app" "hub" {
   resource_group_name          = azurerm_resource_group.rg.name
   container_app_environment_id = azurerm_container_app_environment.env.id
   revision_mode                = "Single"
+  workload_profile_name        = var.private_storage || var.consumption_workload_profile ? "Consumption" : null
 
   identity {
     type         = "UserAssigned"
