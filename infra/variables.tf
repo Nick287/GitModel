@@ -10,6 +10,23 @@ variable "private_storage" {
   default     = false
 }
 
+variable "storage_managed_identity" {
+  type        = bool
+  description = "Use preview environment-level managed identity authentication for Azure Files SMB mounts."
+  default     = false
+}
+
+variable "storage_protocol" {
+  type        = string
+  description = "Azure Files protocol for /data: SMB (Standard storage) or NFS (Premium SSD provisioned v2, keyless, private endpoint only; requires private_storage)."
+  default     = "SMB"
+
+  validation {
+    condition     = contains(["SMB", "NFS"], var.storage_protocol)
+    error_message = "storage_protocol must be \"SMB\" or \"NFS\"."
+  }
+}
+
 variable "consumption_workload_profile" {
   type        = bool
   description = "Explicitly configure the built-in Consumption workload profile without requiring a custom VNet."

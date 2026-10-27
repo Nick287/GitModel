@@ -236,12 +236,54 @@ private_storage = true
 ```
 
 启用后自动创建 VNet、子网、Azure Files 私有端点和私有 DNS，并关闭存储公网访问。
-默认 `false`，不创建上述私网资源。此配置仅控制存储访问，应用入口仍为公网 HTTPS；
-Azure Files SMB 挂载仍需要存储 key 认证。
+默认 `false`，不创建上述私网资源。此配置仅控制存储访问，应用入口仍为公网 HTTPS。
 
 已有环境切换网络模式可能需要重建并改变应用域名，应用前应检查 `terraform plan`。
 可通过 `environment_name` 指定替代环境名；`consumption_workload_profile` 可在无 VNet
 时显式启用内置 Consumption profile，完整参数见下表。
+
+### 可选 Managed Identity 存储认证
+
+Azure Files SMB 挂载默认使用存储 key；可显式启用托管身份认证预览功能：
+
+```hcl
+storage_managed_identity = true
+```
+
+启用后为 Container Apps **环境**绑定现有用户分配身份，授予存储账号范围的
+`Storage File Data SMB MI Admin` 角色，配置 SMB OAuth 和 Kerberos，并使用独立的
+身份认证挂载定义，不传入存储 key。存储 key 认证和 local users 将关闭；原 key
+挂载定义保留但不用于应用，便于受控回退。`private_storage` 独立控制网络访问方式。
+
+此功能使用 AzAPI 和预览 API，需目标 Azure 环境支持，并等待 RBAC 权限传播。
+通过 Azure CLI 部署时先选择与目标订阅对应的已登录账号，避免多账号缓存选错身份。
+身份模式会在启动前验证实际挂载以及已有数据库；挂载缺失、空库或缺表时阻止应用启动，
+不会自动覆盖或初始化异常的已有数据库。切换前先只读验证原共享，并检查部署计划。
+
+SMB 身份挂载用 token 换取 Kerberos 票据时走存储账号的**公网 endpoint**，不经过私有端点，
+因此该模式下即使 `private_storage = true` 也会保持存储公网访问开启（shared key 已关闭，
+只有获得 RBAC 授权的 Entra 身份可访问）。若订阅策略会关闭存储公网访问，改用下面的 NFS。
+
+### 可选 NFS 存储
+
+```hcl
+private_storage  = true
+storage_protocol = "NFS"
+```
+
+另建一个 Premium SSD（provisioned v2，32 GiB）`FileStorage` 账号和 NFS share，通过私有端点
+挂载到 `/data`。NFS 不使用存储 key、token 或 Kerberos，仅靠网络隔离，存储账号**公网访问始终
+关闭**，不受「禁用 shared key / 关闭公网」类策略影响。最低配置含 3,000 IOPS 与 100 MiB/s，
+约 $4/月（另加私有端点费用）。必须同时启用 `private_storage`。
+
+- NFS 的文件锁由服务端真实执行（SMB 下靠 `nobrl` 关闭）；Container Apps 不传递 NFS
+  挂载参数，每次 SQLite 读事务都是一次网络往返（实测读约 25 ms、写约 80 ms）。
+- share 设为 `NoRootSquash`（容器以 root 运行），文件服务关闭 NFS 传输加密要求
+  （Container Apps 不支持），账号其余流量仍强制 HTTPS。
+- 同样会在启动前用 init container 验证挂载与已有数据库。
+- 切换协议不会迁移数据：新 share 是空的。先 `-target` 创建 NFS 资源，停掉应用后把
+  `hub.db` 用 SQLite backup 拷到新 share 并核对，再完整 `apply` 切换 volume。原 SMB
+  账号保留（公网重新关闭），改回 `storage_protocol = "SMB"` 即可回退到切换时的数据。
 
 > **存储说明**：存储账户与 file share 都在应用所在资源组内由 Terraform 创建（不再依赖外部
 > 存储账户 / connection string）。`*.tfstate` 含敏感信息，已被 `.gitignore` 排除，**切勿提交**。
@@ -256,6 +298,8 @@ Azure Files SMB 挂载仍需要存储 key 认证。
 | --- | --- | --- |
 | `resource_group_name` | `gitmodel-rg` | 新建的资源组名 |
 | `private_storage` | `false` | 自定义 VNet、Azure Files 私有端点及关闭存储公网访问 |
+| `storage_managed_identity` | `false` | 预览版环境级身份认证 SMB 挂载，关闭 key 认证并启用挂载启动检查 |
+| `storage_protocol` | `SMB` | `/data` 使用的 Azure Files 协议；`NFS` 为 Premium SSD、无 key、仅私有端点，需 `private_storage` |
 | `consumption_workload_profile` | `false` | 无需 VNet，显式配置内置 Consumption profile；私网模式也会启用该 profile |
 | `environment_name` | `null` | 可选环境名，默认 `${prefix}-env`；替换网络环境时可指定新名称 |
 | `location` | `centralus` | Azure 区域 |

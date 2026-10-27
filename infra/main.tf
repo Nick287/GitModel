@@ -115,10 +115,9 @@ resource "azurerm_role_assignment" "acr_pull" {
 
 # --- Persistent storage for /data -----------------------------------------
 #
-# A dedicated storage account + file share, created in the SAME resource group
-# as the app. Container Apps' Azure Files mount requires shared-key auth, so the
-# account keeps shared_access_key_enabled = true. The account name needs to be
-# globally unique, so a random suffix is appended (like the ACR above).
+# A dedicated storage account + file share in the app's resource group.
+# Key-based mounts are the default; managed identity mode disables shared keys.
+# The account name uses a random suffix for global uniqueness.
 
 resource "random_string" "storage_suffix" {
   length  = 8
@@ -127,13 +126,19 @@ resource "random_string" "storage_suffix" {
 }
 
 resource "azurerm_storage_account" "data" {
-  name                          = "${var.prefix}${random_string.storage_suffix.result}"
-  resource_group_name           = azurerm_resource_group.rg.name
-  location                      = azurerm_resource_group.rg.location
-  account_tier                  = "Standard"
-  account_replication_type      = "LRS"
-  shared_access_key_enabled     = true
-  public_network_access_enabled = !var.private_storage
+  name                      = "${var.prefix}${random_string.storage_suffix.result}"
+  resource_group_name       = azurerm_resource_group.rg.name
+  location                  = azurerm_resource_group.rg.location
+  account_tier              = "Standard"
+  account_replication_type  = "LRS"
+  local_user_enabled        = !var.storage_managed_identity
+  shared_access_key_enabled = !var.storage_managed_identity
+  # The SMB managed identity mount exchanges its token for a Kerberos ticket
+  # through the account's public endpoint, not the private endpoint, so that
+  # mode needs public access even with private_storage. With shared keys off,
+  # only RBAC-authorized Entra identities can use it. Once /data is on NFS
+  # this account no longer serves the app and closes again.
+  public_network_access_enabled = !var.private_storage || (var.storage_managed_identity && !local.nfs)
   # The /data share holds the SQLite DB; nothing here should ever be anonymously
   # reachable. Pin blob public access off (also the org-policy default), which
   # keeps `terraform plan` clean instead of drifting back to the schema default.
@@ -154,8 +159,16 @@ resource "azurerm_container_app_environment" "env" {
   location                 = azurerm_resource_group.rg.location
   infrastructure_subnet_id = var.private_storage ? azurerm_subnet.apps[0].id : null
 
+  dynamic "identity" {
+    for_each = var.storage_managed_identity ? [1] : []
+    content {
+      type         = "UserAssigned"
+      identity_ids = [azurerm_user_assigned_identity.app.id]
+    }
+  }
+
   dynamic "workload_profile" {
-    for_each = var.private_storage || var.consumption_workload_profile ? [1] : []
+    for_each = var.private_storage ? [1] : []
     content {
       name                  = "Consumption"
       workload_profile_type = "Consumption"
@@ -187,7 +200,7 @@ resource "azurerm_container_app" "hub" {
   resource_group_name          = azurerm_resource_group.rg.name
   container_app_environment_id = azurerm_container_app_environment.env.id
   revision_mode                = "Single"
-  workload_profile_name        = var.private_storage || var.consumption_workload_profile ? "Consumption" : null
+  workload_profile_name        = var.private_storage ? "Consumption" : null
 
   identity {
     type         = "UserAssigned"
@@ -214,16 +227,56 @@ resource "azurerm_container_app" "hub" {
     min_replicas = local.replicas
     max_replicas = local.replicas
 
+    dynamic "init_container" {
+      for_each = var.storage_managed_identity || local.nfs ? [1] : []
+      content {
+        name    = "verify-storage"
+        image   = "${local.acr_login_server}/${local.image_ref}"
+        cpu     = 0.25
+        memory  = "0.5Gi"
+        command = ["python", "-c"]
+        args = [<<-PYTHON
+          import os
+          import sqlite3
+          from contextlib import closing
+          from pathlib import Path
+          if not os.path.ismount('/data'):
+              raise RuntimeError('Azure Files is not mounted at /data')
+          database = Path('/data/hub.db')
+          if database.exists():
+              if database.stat().st_size == 0:
+                  raise RuntimeError('Existing database is empty; refusing to initialize it')
+              with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=30)) as connection:
+                  if connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kv'").fetchone() is None:
+                      raise RuntimeError('Existing database has no kv table')
+                  if connection.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
+                      raise RuntimeError('Existing database failed integrity check')
+          print('Azure Files mount verified', flush=True)
+        PYTHON
+        ]
+
+        volume_mounts {
+          name = "data"
+          path = "/data"
+        }
+      }
+    }
+
     volume {
       name         = "data"
-      storage_type = "AzureFile"
-      storage_name = azurerm_container_app_environment_storage.data.name
+      storage_type = local.nfs ? "NfsAzureFile" : "AzureFile"
+      storage_name = (
+        local.nfs ? azurerm_container_app_environment_storage.nfs[0].name :
+        var.storage_managed_identity ? azapi_resource.identity_storage[0].name :
+        azurerm_container_app_environment_storage.data.name
+      )
       # SQLite needs file locking that Azure Files (SMB) byte-range locks don't
       # provide, causing "database is locked". nobrl disables byte-range locks
       # (safe with a single replica = single writer). Paired with a non-WAL
       # journal mode (HUB_DB_JOURNAL_MODE) since WAL's -shm mmap is unsupported
-      # on SMB too.
-      mount_options = "nobrl"
+      # on SMB too. NFS locks work as-is, and Container Apps ignores NFS mount
+      # options anyway.
+      mount_options = local.nfs ? null : "nobrl"
     }
 
     container {
@@ -237,8 +290,8 @@ resource "azurerm_container_app" "hub" {
         value = "/data"
       }
 
-      # /data is an Azure Files (SMB) mount; SQLite WAL relies on mmap shared
-      # memory unavailable there and fails with "database is locked". Use a
+      # /data is an Azure Files (SMB or NFS) mount; SQLite WAL relies on mmap
+      # shared memory that network filesystems don't support. Use a
       # rollback-journal mode that works on network filesystems (safe here
       # because the app runs as a single replica = single writer).
       env {
