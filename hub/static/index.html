@@ -94,11 +94,11 @@
   button.danger:hover { background:rgba(248,81,73,.12); filter:none; box-shadow:none; }
   button:disabled { opacity:.45; cursor:not-allowed; filter:none; box-shadow:none; transform:none; }
 
-  input {
+  input, select {
     background:var(--bg2); border:1px solid var(--border2); color:var(--fg);
     padding:9px 12px; border-radius:8px; font-size:13px; transition:border-color .15s, box-shadow .15s;
   }
-  input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(56,139,253,.2); }
+  input:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(56,139,253,.2); }
   input::placeholder { color:#5a6470; }
 
   code { background:var(--bg2); padding:2px 6px; border-radius:5px; border:1px solid var(--border); font-size:12px; }
@@ -122,6 +122,18 @@
   tbody tr { transition:background .12s; }
   tbody tr:hover { background:rgba(56,139,253,.05); }
   tbody tr:last-child td { border-bottom:none; }
+
+  /* Model list: sortable headers and vendor group rows */
+  th.sortable { cursor:pointer; user-select:none; }
+  th.sortable:hover { color:var(--fg); }
+  th.sortable.sorted { color:var(--accent); }
+  th.sortable .sort-ind { display:inline-block; width:1em; margin-left:4px; }
+  tr.group-row td {
+    background:var(--panel2); color:var(--fg); font-weight:600; font-size:12px;
+    letter-spacing:.3px; padding:7px 12px;
+  }
+  tr.group-row:hover { background:none; }
+  tr.group-row .muted { font-weight:400; margin-left:6px; }
 
   .muted { color:var(--muted); font-size:13px; }
 
@@ -363,8 +375,18 @@
   <section class="tab-panel" id="tab-models">
     <div class="card">
       <h2 data-i18n="models.title">可用模型</h2>
-      <button id="btn-models" class="ghost" data-i18n="models.load">加载模型列表</button>
-      <table style="margin-top:12px"><thead><tr><th data-i18n="th.id">ID</th><th data-i18n="th.vendor">厂商</th><th data-i18n="th.type">类型</th></tr></thead>
+      <div class="row">
+        <button id="btn-models" class="ghost" data-i18n="models.load">加载模型列表</button>
+        <select id="model-vendor-filter" aria-label="vendor"></select>
+        <label class="switch"><input type="checkbox" id="toggle-model-group" checked /><span class="slider"></span></label>
+        <span class="muted" data-i18n="models.groupByVendor">按厂商分组</span>
+        <span id="model-count" class="muted"></span>
+      </div>
+      <table style="margin-top:12px"><thead><tr>
+        <th class="sortable" data-sort="id"><span data-i18n="th.id">ID</span><span class="sort-ind"></span></th>
+        <th class="sortable" data-sort="vendor"><span data-i18n="th.vendor">厂商</span><span class="sort-ind"></span></th>
+        <th class="sortable" data-sort="type"><span data-i18n="th.type">类型</span><span class="sort-ind"></span></th>
+      </tr></thead>
         <tbody id="model-list"></tbody></table>
     </div>
   </section>
@@ -555,6 +577,10 @@ const I18N = {
     "th.outRate": "输出单价",
     "models.title": "可用模型",
     "models.load": "加载模型列表",
+    "models.groupByVendor": "按厂商分组",
+    "models.allVendors": "全部厂商",
+    "models.count": "共 {n} 个模型",
+    "models.countFiltered": "{n} / {total} 个模型",
     "keys.title": "客户端 API Key",
     "keys.desc": "给 Codex / Claude Code 用的本地 key。开启「客户端鉴权」后，下游必须带这里的 key。",
     "keys.namePh": "名称，如 codex",
@@ -711,6 +737,10 @@ const I18N = {
     "th.outRate": "Output rate",
     "models.title": "Available models",
     "models.load": "Load model list",
+    "models.groupByVendor": "Group by vendor",
+    "models.allVendors": "All vendors",
+    "models.count": "{n} models",
+    "models.countFiltered": "{n} / {total} models",
     "keys.title": "Client API keys",
     "keys.desc": "Local keys for Codex / Claude Code. When client auth is on, downstream requests must carry one of these keys.",
     "keys.namePh": "Name, e.g. codex",
@@ -811,6 +841,7 @@ function setLang(lang) {
 }
 function rerenderDynamic() {
   renderExamples();
+  renderModels();
   if (!appInited) return;
   refreshStatus();
   setAuthText(_lastAuth);
@@ -1099,10 +1130,99 @@ $("btn-models").onclick = async () => {
     return;
   }
   const d = await r.json();
-  $("model-list").innerHTML = d.data.map(m =>
-    `<tr><td><code>${m.id}</code></td><td>${m.vendor||""}</td><td>${m.type||""}</td></tr>`
-  ).join("");
+  _models = d.data || [];
+  renderModels();
 };
+
+// Sort/group/filter preferences survive reloads; the list itself is fetched
+// on demand, so only the view state is persisted.
+let _models = null;
+const _modelView = Object.assign(
+  { key: "vendor", dir: 1, group: true, vendor: "" },
+  JSON.parse(localStorage.getItem("hub_model_view") || "{}")
+);
+function saveModelView() { localStorage.setItem("hub_model_view", JSON.stringify(_modelView)); }
+
+// Natural order, so "gpt-4.1" sorts before "gpt-4o" and "claude-3.7" before
+// "claude-sonnet-4". Missing values always sink to the bottom, whichever way
+// the column is sorted, so the direction is applied here rather than after.
+const _collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+function cmpField(a, b, dir = 1) {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  return _collator.compare(a, b) * dir;
+}
+// Option value for "no vendor"; "" already means "all vendors".
+const NO_VENDOR = "__none__";
+
+function renderModels() {
+  // Header indicators reflect the view even before the list is loaded.
+  document.querySelectorAll("#tab-models th.sortable").forEach(th => {
+    const on = th.dataset.sort === _modelView.key;
+    th.classList.toggle("sorted", on);
+    th.querySelector(".sort-ind").textContent = on ? (_modelView.dir > 0 ? "▲" : "▼") : "";
+  });
+  $("toggle-model-group").checked = _modelView.group;
+
+  const sel = $("model-vendor-filter");
+  const vkey = m => m.vendor || NO_VENDOR;
+  const vendors = _models ? [...new Set(_models.map(vkey))].sort((a, b) =>
+    cmpField(a === NO_VENDOR ? "" : a, b === NO_VENDOR ? "" : b)) : [];
+  // A vendor remembered from a previous session may be gone upstream.
+  if (_models && _modelView.vendor && !vendors.includes(_modelView.vendor)) _modelView.vendor = "";
+  sel.innerHTML = `<option value="">${esc(t("models.allVendors"))}</option>` +
+    vendors.map(v => `<option value="${esc(v)}">${esc(v === NO_VENDOR ? t("common.unknown") : v)}</option>`).join("");
+  sel.value = _modelView.vendor;
+  sel.style.display = _models ? "" : "none";
+
+  if (!_models) { $("model-count").textContent = ""; return; }
+
+  const { key, dir, group, vendor } = _modelView;
+  const list = _models
+    .filter(m => !vendor || vkey(m) === vendor)
+    .sort((a, b) => {
+      // When grouped, vendor is the outer order; its direction follows the
+      // vendor column only if that is the one being sorted.
+      if (group) {
+        const g = cmpField(a.vendor, b.vendor, key === "vendor" ? dir : 1);
+        if (g) return g;
+      }
+      return cmpField(a[key], b[key], dir) || cmpField(a.id, b.id);
+    });
+
+  $("model-count").textContent = list.length === _models.length
+    ? t("models.count", { n: list.length })
+    : t("models.countFiltered", { n: list.length, total: _models.length });
+
+  const row = m => `<tr><td><code>${esc(m.id)}</code></td><td>${esc(m.vendor || "")}</td><td>${esc(m.type || "")}</td></tr>`;
+  if (!group) { $("model-list").innerHTML = list.map(row).join(""); return; }
+
+  const counts = {};
+  list.forEach(m => { const v = m.vendor || ""; counts[v] = (counts[v] || 0) + 1; });
+  let html = "", last = null;
+  for (const m of list) {
+    const v = m.vendor || "";
+    if (v !== last) {
+      html += `<tr class="group-row"><td colspan="3">${v ? esc(v) : esc(t("common.unknown"))}<span class="muted">${counts[v]}</span></td></tr>`;
+      last = v;
+    }
+    html += row(m);
+  }
+  $("model-list").innerHTML = html;
+}
+
+document.querySelectorAll("#tab-models th.sortable").forEach(th => {
+  th.onclick = () => {
+    const k = th.dataset.sort;
+    if (_modelView.key === k) _modelView.dir = -_modelView.dir;
+    else { _modelView.key = k; _modelView.dir = 1; }
+    saveModelView(); renderModels();
+  };
+});
+$("toggle-model-group").onchange = e => { _modelView.group = e.target.checked; saveModelView(); renderModels(); };
+$("model-vendor-filter").onchange = e => { _modelView.vendor = e.target.value; saveModelView(); renderModels(); };
+renderModels();
 
 // ---------- Keys ----------
 async function refreshKeys() {
