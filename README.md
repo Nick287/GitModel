@@ -12,7 +12,9 @@ GitHub 登录、token 用量统计与费用估算、API key 管理。
 
 ## ✨ 功能
 
-- **OpenAI 兼容**：`GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses`（含流式）
+- **OpenAI 兼容**：`GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses`（含流式）、
+  `POST /v1/embeddings`、`POST /v1/images/generations`、`POST /v1/images/edits`
+- **决策模型**：`POST /v1/decisions`（如 `gpt-6-luna-decisions`）、`POST /v1/systemone`（如 `microsoft-decision-1-1`），请求体原样透传
 - **Anthropic 兼容**：`POST /v1/messages`（含流式、工具调用 `tool_use` / `tool_result`、图片输入）
 - **自动鉴权**：完成 Copilot 两段式鉴权（长期 OAuth token → 短期 API token，内存缓存并自动续期）
 - **模型名兼容**：官方 Anthropic 模型 ID 自动映射到 Copilot slug，未识别的名字原样透传
@@ -143,10 +145,32 @@ export OPENAI_API_KEY="<门户生成的 key>"
 > **图片输入（多模态）** 已支持：网关在检测到图片内容时自动附加
 > `Copilot-Vision-Request: true` 头。
 
+### Embedding 与决策模型
+
+这几类模型出现在模型列表里，但不走对话接口，各有专用路由，请求体原样透传给上游：
+
+| 模型类型 | 路由 | 示例模型 |
+| --- | --- | --- |
+| Embedding | `POST /v1/embeddings` | `text-embedding-3-small` |
+| 决策 | `POST /v1/decisions` | `gpt-6-luna-decisions` |
+| 决策 | `POST /v1/systemone` | `microsoft-decision-1-1` |
+
+```bash
+curl http://127.0.0.1:8088/v1/embeddings \
+  -H "Authorization: Bearer <门户生成的 key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"text-embedding-3-small","input":["hello"],"dimensions":256}'
+```
+
+`input` 传字符串或数组均可。用量照常计入门户统计。
+
 ### 图片生成（Azure GPT Image）
 
 网关可挂一个 **Azure OpenAI `gpt-image`** 部署作为图片后端，对外暴露 OpenAI 兼容的
 `POST /v1/images/generations`（文生图）与 `POST /v1/images/edits`（图生图 / 局部重绘）。
+
+`model` 是上游列出的图片模型（如 `gpt-image-2.5-flare`）时，请求直接走 Copilot，无需下面的
+Azure 配置；其他情况（包括不传 `model`）走 Azure 后端。
 
 先在门户 **「设置 → 图片生成」** 填入 Azure 的 **Endpoint** 与 **API Key**（保存在本地
 `db/` 的 SQLite，不写入代码 / 环境变量；endpoint 填完整的
