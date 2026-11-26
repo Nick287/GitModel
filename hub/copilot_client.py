@@ -263,6 +263,58 @@ async def list_models() -> list[dict[str, Any]]:
     return r.json().get("data", [])
 
 
+# Model metadata changes rarely and the routing below asks on every image
+# request, so one upstream listing is reused for a few minutes.
+_MODEL_TYPES_TTL = 300.0
+_model_types: dict[str, Any] = {}
+
+
+async def model_type(model_id: str | None) -> str | None:
+    """Return the upstream ``capabilities.type`` of a model, or None.
+
+    ``chat`` / ``embeddings`` / ``image`` / ``decisions``. None means the
+    upstream does not list the id (or no id was given), which callers treat as
+    "not a Copilot model" rather than as an error.
+    """
+    if not model_id:
+        return None
+    now = time.time()
+    if not _model_types or _model_types.get("at", 0) + _MODEL_TYPES_TTL < now:
+        models = await list_models()
+        _model_types.update(
+            at=now,
+            types={
+                m.get("id"): (m.get("capabilities") or {}).get("type")
+                for m in models
+            },
+        )
+    return _model_types["types"].get(model_id)
+
+
+async def post_multipart(
+    path: str,
+    data: dict[str, Any],
+    files: list[tuple[str, tuple[str, bytes, str]]],
+) -> tuple[int, dict[str, Any]]:
+    """Buffered multipart POST (image edits). Returns (status_code, json_body).
+
+    No Content-Type here on purpose: httpx has to generate it, because the
+    multipart boundary is part of the header value.
+    """
+    token, endpoint = await get_api_token()
+    r = await _client().post(
+        f"{endpoint}{path}",
+        headers={"Authorization": f"Bearer {token}", **EDITOR_HEADERS},
+        data=data,
+        files=files,
+    )
+    try:
+        body = r.json()
+    except Exception:
+        body = {"error": {"message": r.text}}
+    return r.status_code, body
+
+
 async def post_json(
     path: str,
     payload: dict[str, Any],
