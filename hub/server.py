@@ -577,6 +577,11 @@ async def _json_body(request: Request) -> dict[str, Any]:
 async def v1_embeddings(request: Request) -> Any:
     client_key = _check_client_auth(request)
     body = await _json_body(request)
+    # OpenAI accepts a bare string as ``input``; the upstream answers that
+    # with an unexplained 400 and only takes a list. The response has the same
+    # shape either way, so wrap it here.
+    if isinstance(body.get("input"), str):
+        body = {**body, "input": [body["input"]]}
     return await _copilot_buffered(
         client_key, body.get("model"), "embeddings",
         lambda: cc.post_json("/embeddings", body), responses_shape=False,

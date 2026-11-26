@@ -88,6 +88,12 @@ def test_embeddings_forwards_without_v1_prefix_and_records_usage(hub):
     assert rec["status"] == 200
 
 
+def test_embeddings_string_input_is_sent_as_a_list(hub):
+    r = hub.client.post("/v1/embeddings", json={"model": "m", "input": "hi"})
+    assert r.status_code == 200
+    assert hub.calls == [("/embeddings", {"model": "m", "input": ["hi"]})]
+
+
 @pytest.mark.parametrize(
     "route,upstream,endpoint",
     [
