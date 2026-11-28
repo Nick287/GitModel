@@ -7,6 +7,11 @@ OpenAI-compatible (for Codex, OpenAI SDK, curl):
     GET  /v1/models
     POST /v1/chat/completions      (stream + non-stream)
     POST /v1/responses             (stream + non-stream)
+    POST /v1/embeddings
+    POST /v1/decisions             (typed decisions, e.g. gpt-6-luna-decisions)
+    POST /v1/systemone             (typed decisions, e.g. microsoft-decision-1-1)
+    POST /v1/images/generations    (Copilot image models, else the Azure backend)
+    POST /v1/images/edits
 
 Anthropic-compatible (for Claude Code, Anthropic SDK):
     POST /v1/messages              (stream + non-stream)
@@ -510,7 +515,117 @@ async def v1_responses(request: Request) -> Any:
 
 
 # =========================================================================== #
-# Image generation endpoints (Azure OpenAI gpt-image backend)
+# Non-chat Copilot endpoints: embeddings, typed decisions, images
+# =========================================================================== #
+# The upstream lists these models next to the chat ones, so /v1/models
+# advertises them, but none of them answers on a chat route. Each is a plain
+# buffered JSON call, so they share one forwarder. The second element is the
+# upstream path, which is not uniform: embeddings has no /v1 prefix while the
+# decision and image routes require it (the unprefixed forms 404).
+async def _copilot_buffered(
+    client_key: str | None,
+    model: str | None,
+    endpoint: str,
+    call: Any,
+    *,
+    responses_shape: bool,
+) -> JSONResponse:
+    """Run one buffered upstream call, record it, and mirror the answer."""
+    if not cc.is_authenticated():
+        raise HTTPException(status_code=503, detail="Hub not logged in to Copilot")
+    try:
+        status, data = await call()
+    except cc.NotAuthenticatedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except (RuntimeError, httpx.HTTPError) as e:
+        # Token exchange or transport trouble on our side of the upstream.
+        log.error("upstream call failed endpoint=%s model=%s: %s", endpoint, model, e)
+        _record(client_key=client_key, model=model, served=None,
+                endpoint=endpoint, usage3=(0, 0, 0), streamed=False,
+                estimated=False, status=502)
+        raise HTTPException(status_code=502, detail=str(e) or type(e).__name__)
+    if status != 200:
+        status = _passthrough_status(status)
+        _record(client_key=client_key, model=model, served=None,
+                endpoint=endpoint, usage3=(0, 0, 0), streamed=False,
+                estimated=False, status=status)
+        return JSONResponse(data, status_code=status)
+    usage = data.get("usage") if isinstance(data, dict) else None
+    served = data.get("model") if isinstance(data, dict) else None
+    i, o, t, cached = _norm_usage(usage, responses_shape=responses_shape)
+    nano, counts = _copilot_usage(data)
+    _record(client_key=client_key, model=model, served=served,
+            endpoint=endpoint, usage3=(i, o, t), streamed=False,
+            estimated=False, cached=cached or counts.get("cache_read", 0),
+            cache_write=counts.get("cache_write", 0), nano_aiu=nano)
+    if not store.get_expose_copilot_usage():
+        aa.strip_copilot_usage(data)
+    return JSONResponse(data)
+
+
+async def _json_body(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request body must be JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    return body
+
+
+@app.post("/v1/embeddings")
+async def v1_embeddings(request: Request) -> Any:
+    client_key = _check_client_auth(request)
+    body = await _json_body(request)
+    # OpenAI accepts a bare string as ``input``; the upstream answers that
+    # with an unexplained 400 and only takes a list. The response has the same
+    # shape either way, so wrap it here.
+    if isinstance(body.get("input"), str):
+        body = {**body, "input": [body["input"]]}
+    return await _copilot_buffered(
+        client_key, body.get("model"), "embeddings",
+        lambda: cc.post_json("/embeddings", body), responses_shape=False,
+    )
+
+
+@app.post("/v1/decisions")
+async def v1_decisions(request: Request) -> Any:
+    client_key = _check_client_auth(request)
+    body = await _json_body(request)
+    return await _copilot_buffered(
+        client_key, body.get("model"), "decisions",
+        lambda: cc.post_json("/v1/decisions", body), responses_shape=True,
+    )
+
+
+@app.post("/v1/systemone")
+async def v1_systemone(request: Request) -> Any:
+    client_key = _check_client_auth(request)
+    body = await _json_body(request)
+    return await _copilot_buffered(
+        client_key, body.get("model"), "systemone",
+        lambda: cc.post_json("/v1/systemone", body), responses_shape=True,
+    )
+
+
+async def _is_copilot_image_model(model: Any) -> bool:
+    """True when the upstream lists ``model`` as an image model.
+
+    Anything else -- no model named, an unknown id, the hub not logged in, or
+    the listing itself failing -- answers False, which leaves the request on
+    the Azure backend exactly as before this routing existed.
+    """
+    if not isinstance(model, str) or not model or not cc.is_authenticated():
+        return False
+    try:
+        return await cc.model_type(model) == "image"
+    except Exception as e:  # noqa: BLE001 - routing must not fail the request
+        log.warning("model lookup failed for %s, using Azure image backend: %s", model, e)
+        return False
+
+
+# =========================================================================== #
+# Image generation endpoints (Copilot image models, else Azure OpenAI gpt-image)
 # =========================================================================== #
 def _record_image(client_key, model, endpoint, data, status) -> None:
     """Record a usage row for an image request, reusing the Responses-shaped
@@ -528,7 +643,13 @@ def _record_image(client_key, model, endpoint, data, status) -> None:
 @app.post("/v1/images/generations")
 async def v1_images_generations(request: Request) -> Any:
     client_key = _check_client_auth(request)
-    body = await request.json()
+    body = await _json_body(request)
+    if await _is_copilot_image_model(body.get("model")):
+        return await _copilot_buffered(
+            client_key, body.get("model"), "images.generations",
+            lambda: cc.post_json("/v1/images/generations", body),
+            responses_shape=True,
+        )
     if not ic.is_configured():
         raise HTTPException(
             status_code=503, detail="Image backend not configured"
@@ -542,10 +663,6 @@ async def v1_images_generations(request: Request) -> Any:
 @app.post("/v1/images/edits")
 async def v1_images_edits(request: Request) -> Any:
     client_key = _check_client_auth(request)
-    if not ic.is_configured():
-        raise HTTPException(
-            status_code=503, detail="Image backend not configured"
-        )
     form = await request.form()
     data: dict[str, Any] = {}
     files: list[tuple[str, tuple[str, bytes, str]]] = []
@@ -564,6 +681,16 @@ async def v1_images_edits(request: Request) -> Any:
             )
         else:
             data[field] = value
+    if await _is_copilot_image_model(data.get("model")):
+        return await _copilot_buffered(
+            client_key, data.get("model"), "images.edits",
+            lambda: cc.post_multipart("/v1/images/edits", data, files),
+            responses_shape=True,
+        )
+    if not ic.is_configured():
+        raise HTTPException(
+            status_code=503, detail="Image backend not configured"
+        )
     model = data.get("model") or ic.get_model()
     status, resp = await ic.edit(data, files)
     _record_image(client_key, model, "images.edits", resp, status)
